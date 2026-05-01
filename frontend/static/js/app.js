@@ -43,6 +43,16 @@ function _fmtDate(s) {
   } catch { return s; }
 }
 
+function _severityBadge(sev) {
+  if (!sev || !sev.level) return '';
+  const lvl = sev.level;
+  const reasons = (sev.reasons || []).join(' • ');
+  const title = `${lvl.toUpperCase()} (score ${sev.score})${reasons ? ' — ' + reasons : ''}`;
+  return `<span class="sev-badge sev-${_esc(lvl)}" title="${_esc(title)}">${_esc(lvl)}</span>`;
+}
+
+const _SEV_RANK = { critical: 3, high: 2, medium: 1, low: 0 };
+
 // ── Tabs ───────────────────────────────────────────────────────────────────────
 
 function initNav() {
@@ -172,6 +182,12 @@ async function loadDashboard() {
     $('stat-findings').textContent  = d.total_breach_findings;
     $('stat-pastes').textContent    = d.total_paste_findings;
 
+    const sc = d.severity_counts || { critical:0, high:0, medium:0, low:0 };
+    $('stat-critical').textContent = sc.critical || 0;
+    $('stat-high').textContent     = sc.high || 0;
+    $('stat-medium').textContent   = sc.medium || 0;
+    $('stat-low').textContent      = sc.low || 0;
+
     if (d.last_run) {
       $('dash-last-run').innerHTML =
         `Started ${_esc(_fmtDate(d.last_run.started_at))} · ` +
@@ -190,6 +206,7 @@ async function loadDashboard() {
     (d.recent_findings || []).forEach(f => {
       const li = document.createElement('li');
       li.innerHTML =
+        `${_severityBadge(f.severity)} ` +
         `<span class="email">${_esc(f.email)}</span> → ` +
         `<span class="breach">${_esc(f.title || f.breach_name)}</span>` +
         `<span class="when">${_esc(_fmtDate(f.first_seen_at))}</span>`;
@@ -306,6 +323,7 @@ async function loadFindings(_caller) {
       const sens = f.is_sensitive ? '<span class="badge bad">sensitive</span>' : '';
       const tr = document.createElement('tr');
       tr.innerHTML =
+        `<td>${_severityBadge(f.severity)}</td>` +
         `<td>${_esc(f.email)}</td>` +
         `<td>${_esc(f.title || f.breach_name)} ${sens}<br><span class="muted small">${_esc(f.domain || '')}</span></td>` +
         `<td>${_esc(f.breach_date || '—')}</td>` +
@@ -315,7 +333,7 @@ async function loadFindings(_caller) {
       tbody.appendChild(tr);
     });
     if (!tbody.children.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="muted">No findings yet.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="muted">No findings yet.</td></tr>';
     }
   } catch (e) {
     console.warn('loadFindings:', e);
@@ -331,6 +349,7 @@ async function loadPastes() {
     (d.pastes || []).forEach(p => {
       const tr = document.createElement('tr');
       tr.innerHTML =
+        `<td>${_severityBadge(p.severity)}</td>` +
         `<td>${_esc(p.email)}</td>` +
         `<td>${_esc(p.source || '?')}</td>` +
         `<td>${_esc(p.title || '—')}</td>` +
@@ -340,7 +359,7 @@ async function loadPastes() {
       tbody.appendChild(tr);
     });
     if (!tbody.children.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="muted">No paste findings yet.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="muted">No paste findings yet.</td></tr>';
     }
   } catch (e) {
     console.warn('loadPastes:', e);
@@ -421,18 +440,38 @@ function finishReport(e) {
   const out = $('report-results');
   out.innerHTML = '';
 
+  const sortBySev = (a, b) =>
+    (_SEV_RANK[(b.severity||{}).level] || 0) - (_SEV_RANK[(a.severity||{}).level] || 0);
+  const breaches = [..._reportBuckets.breaches].sort(sortBySev);
+  const pastes   = [..._reportBuckets.pastes].sort(sortBySev);
+
+  const summary = document.createElement('div');
+  summary.className = 'report-block';
+  const counts = { critical:0, high:0, medium:0, low:0 };
+  breaches.forEach(f => { counts[(f.severity||{}).level || 'low']++; });
+  summary.innerHTML =
+    `<h4>Summary</h4>` +
+    `<p>${breaches.length} breach finding(s) — ` +
+    `<span class="sev-badge sev-critical">${counts.critical} critical</span> ` +
+    `<span class="sev-badge sev-high">${counts.high} high</span> ` +
+    `<span class="sev-badge sev-medium">${counts.medium} medium</span> ` +
+    `<span class="sev-badge sev-low">${counts.low} low</span></p>` +
+    `<p>${pastes.length} paste finding(s)</p>`;
+  out.appendChild(summary);
+
   const breachBlock = document.createElement('div');
   breachBlock.className = 'report-block';
-  breachBlock.innerHTML = `<h4>Breaches (${_reportBuckets.breaches.length})</h4>`;
-  if (!_reportBuckets.breaches.length) {
+  breachBlock.innerHTML = `<h4>Breaches (${breaches.length})</h4>`;
+  if (!breaches.length) {
     breachBlock.innerHTML += '<div class="report-empty">None</div>';
   } else {
     const ul = document.createElement('ul');
     ul.className = 'list';
-    _reportBuckets.breaches.forEach(f => {
+    breaches.forEach(f => {
       const li = document.createElement('li');
       const dc = (f.data_classes || []).map(c => `<span class="badge">${_esc(c)}</span>`).join('');
       li.innerHTML =
+        `${_severityBadge(f.severity)} ` +
         `<span class="email">${_esc(f.email)}</span> → ` +
         `<span class="breach">${_esc(f.title || f.breach_name)}</span> ` +
         `<span class="when">${_esc(f.breach_date || '—')}</span><br>` +
@@ -445,15 +484,16 @@ function finishReport(e) {
 
   const pasteBlock = document.createElement('div');
   pasteBlock.className = 'report-block';
-  pasteBlock.innerHTML = `<h4>Pastes (${_reportBuckets.pastes.length})</h4>`;
-  if (!_reportBuckets.pastes.length) {
+  pasteBlock.innerHTML = `<h4>Pastes (${pastes.length})</h4>`;
+  if (!pastes.length) {
     pasteBlock.innerHTML += '<div class="report-empty">None</div>';
   } else {
     const ul = document.createElement('ul');
     ul.className = 'list';
-    _reportBuckets.pastes.forEach(f => {
+    pastes.forEach(f => {
       const li = document.createElement('li');
       li.innerHTML =
+        `${_severityBadge(f.severity)} ` +
         `<span class="email">${_esc(f.email)}</span> → ` +
         `<span class="breach">${_esc(f.source || '?')}</span> ` +
         `${_esc(f.title || '')} ` +

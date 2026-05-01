@@ -122,3 +122,35 @@ button.danger { color: var(--bad); }
 .report-block { margin-bottom: 16px; }
 .report-block h4 { margin: 0 0 6px; }
 .report-empty { color: var(--muted); font-style: italic; }
+
+/* Severity ─────────────────────────────────────────────────────────────────── */
+.severity-cards { margin-bottom: 12px; }
+.sev-card { border-left: 3px solid var(--border); }
+.sev-card.sev-critical { border-left-color: var(--bad); }
+.sev-card.sev-high     { border-left-color: var(--warn); }
+.sev-card.sev-medium   { border-left-color: #bb8009; }
+.sev-card.sev-low      { border-left-color: var(--muted); }
+.sev-card .stat        { color: var(--muted); }
+.sev-card.sev-critical .stat { color: var(--bad); }
+.sev-card.sev-high     .stat { color: var(--warn); }
+.sev-card.sev-medium   .stat { color: #d29922; }
+
+.sev-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: white;
+  letter-spacing: 0.3px;
+  cursor: help;
+}
+.sev-badge.sev-critical { background: var(--bad); }
+.sev-badge.sev-high     { background: var(--warn); }
+.sev-badge.sev-medium   { background: #bb8009; }
+.sev-badge.sev-low      { background: var(--muted); }
+
+.report-block.sev-critical h4 { color: var(--bad); }
+.report-block.sev-high     h4 { color: var(--warn); }
+.report-block.sev-medium   h4 { color: #d29922; }

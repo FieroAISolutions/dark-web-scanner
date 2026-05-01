@@ -7,7 +7,17 @@ from typing import Optional
 
 import httpx
 
+from . import severity as sev_mod
+
 log = logging.getLogger("dws.alerts")
+
+
+def _level(f: dict) -> str:
+    return (f.get("severity") or {}).get("level", "low")
+
+
+def _by_sev_desc(findings: list[dict]) -> list[dict]:
+    return sorted(findings, key=lambda f: -sev_mod.rank(_level(f)))
 
 
 def _smtp_send(cfg: dict, msg: EmailMessage) -> None:
@@ -98,34 +108,75 @@ async def send_webhook(cfg: dict, *, subject: str, text: str,
         raise RuntimeError(f"webhook HTTP {resp.status_code}: {resp.text[:200]}")
 
 
+def _summary_counts(items: list[dict]) -> dict:
+    out = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for f in items:
+        out[_level(f)] = out.get(_level(f), 0) + 1
+    return out
+
+
 def _format_findings_text(breaches: list[dict], pastes: list[dict]) -> tuple[str, str]:
+    breaches = _by_sev_desc(breaches)
+    pastes = _by_sev_desc(pastes)
+
     lines = []
     if breaches:
-        lines.append(f"New breach findings ({len(breaches)}):")
+        c = _summary_counts(breaches)
+        lines.append(
+            f"New breach findings ({len(breaches)}): "
+            f"{c['critical']} critical, {c['high']} high, "
+            f"{c['medium']} medium, {c['low']} low"
+        )
         for f in breaches[:50]:
             classes = ", ".join(f.get("data_classes") or []) or "—"
-            lines.append(f"  • {f['email']} → {f.get('title') or f['breach_name']} "
-                         f"({f.get('breach_date') or '?'}) [{classes}]")
+            lines.append(
+                f"  [{_level(f).upper()}] {f['email']} → "
+                f"{f.get('title') or f['breach_name']} "
+                f"({f.get('breach_date') or '?'}) [{classes}]"
+            )
         if len(breaches) > 50:
             lines.append(f"  …and {len(breaches) - 50} more")
+
     if pastes:
         if lines:
             lines.append("")
-        lines.append(f"New paste findings ({len(pastes)}):")
+        c = _summary_counts(pastes)
+        lines.append(
+            f"New paste findings ({len(pastes)}): "
+            f"{c['high']} high, {c['medium']} medium, {c['low']} low"
+        )
         for f in pastes[:25]:
-            lines.append(f"  • {f['email']} → {f.get('source') or '?'} "
-                         f"{f.get('title') or ''} ({f.get('paste_date') or '?'})")
+            lines.append(
+                f"  [{_level(f).upper()}] {f['email']} → "
+                f"{f.get('source') or '?'} {f.get('title') or ''} "
+                f"({f.get('paste_date') or '?'})"
+            )
         if len(pastes) > 25:
             lines.append(f"  …and {len(pastes) - 25} more")
+
     text = "\n".join(lines) if lines else "No new findings."
 
-    html_parts = []
+    sev_color = {"critical": "#f85149", "high": "#d29922",
+                 "medium": "#bb8009", "low": "#8b949e"}
+
+    def badge(level: str) -> str:
+        return (f'<span style="display:inline-block;padding:1px 6px;border-radius:4px;'
+                f'font-size:11px;background:{sev_color[level]};color:white;'
+                f'margin-right:6px;text-transform:uppercase;">{level}</span>')
+
+    html_parts: list[str] = []
     if breaches:
-        html_parts.append(f"<h3>New breach findings ({len(breaches)})</h3><ul>")
+        c = _summary_counts(breaches)
+        html_parts.append(
+            f"<h3>New breach findings ({len(breaches)})</h3>"
+            f"<p>{c['critical']} critical · {c['high']} high · "
+            f"{c['medium']} medium · {c['low']} low</p><ul>"
+        )
         for f in breaches[:50]:
             classes = ", ".join(f.get("data_classes") or []) or "—"
             html_parts.append(
-                f"<li><b>{f['email']}</b> → {f.get('title') or f['breach_name']} "
+                f"<li>{badge(_level(f))}<b>{f['email']}</b> → "
+                f"{f.get('title') or f['breach_name']} "
                 f"<i>({f.get('breach_date') or '?'})</i><br>"
                 f"<small>{classes}</small></li>"
             )
@@ -134,10 +185,12 @@ def _format_findings_text(breaches: list[dict], pastes: list[dict]) -> tuple[str
         html_parts.append(f"<h3>New paste findings ({len(pastes)})</h3><ul>")
         for f in pastes[:25]:
             html_parts.append(
-                f"<li><b>{f['email']}</b> → {f.get('source') or '?'} "
-                f"{f.get('title') or ''} <i>({f.get('paste_date') or '?'})</i></li>"
+                f"<li>{badge(_level(f))}<b>{f['email']}</b> → "
+                f"{f.get('source') or '?'} {f.get('title') or ''} "
+                f"<i>({f.get('paste_date') or '?'})</i></li>"
             )
         html_parts.append("</ul>")
+
     html = "".join(html_parts) if html_parts else "<p>No new findings.</p>"
     return text, html
 
@@ -147,12 +200,21 @@ async def alert_new_findings(cfg: dict, breaches: list[dict], pastes: list[dict]
     if not breaches and not pastes:
         return {"skipped": "no new findings"}
 
-    subject = f"DarkWebScanner: {len(breaches)} new breach(es), {len(pastes)} new paste(s)"
+    counts = _summary_counts(breaches)
+    severity_tag = ""
+    if counts["critical"]:
+        severity_tag = f"[CRITICAL×{counts['critical']}] "
+    elif counts["high"]:
+        severity_tag = f"[HIGH×{counts['high']}] "
+
+    subject = (f"{severity_tag}DarkWebScanner: "
+               f"{len(breaches)} new breach(es), {len(pastes)} new paste(s)")
     text, html = _format_findings_text(breaches, pastes)
+
     fields: list[dict] = []
-    for f in breaches[:10]:
+    for f in _by_sev_desc(breaches)[:10]:
         fields.append({
-            "name": f.get("title") or f.get("breach_name", "?"),
+            "name": f"[{_level(f).upper()}] {f.get('title') or f.get('breach_name', '?')}",
             "value": f"{f['email']} ({f.get('breach_date') or '?'})",
         })
 

@@ -242,6 +242,7 @@ async def api_dashboard():
     stats["scan_in_progress"] = _scan_lock.locked()
     stats["recent_findings"] = db.list_findings(limit=10)
     stats["recent_runs"] = db.recent_runs(limit=5)
+    stats["severity_counts"] = db.severity_counts()
     return stats
 
 

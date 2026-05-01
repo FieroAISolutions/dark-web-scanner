@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 import httpx
 
-from . import db
+from . import db, severity as sev_mod
 
 log = logging.getLogger("dws.scanner")
 
@@ -221,6 +221,7 @@ async def run_scan(
                             "breach_date": b.get("BreachDate"),
                             "data_classes": b.get("DataClasses") or [],
                             "is_sensitive": bool(b.get("IsSensitive")),
+                            "severity": sev_mod.compute(b),
                         }
                         result.new_breach_findings.append(finding)
                         await _emit(progress, {"type": "finding", "kind": "breach",
@@ -252,6 +253,8 @@ async def run_scan(
                                 "source": p.get("Source"),
                                 "title": p.get("Title"),
                                 "paste_date": p.get("Date"),
+                                "email_count": p.get("EmailCount"),
+                                "severity": sev_mod.compute_paste(p),
                             }
                             result.new_paste_findings.append(finding)
                             await _emit(progress, {"type": "finding", "kind": "paste",

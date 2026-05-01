@@ -5,6 +5,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Optional
 
+from . import severity as sev_mod
+
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "scanner.db"
 _write_lock = threading.Lock()
 
@@ -267,7 +269,8 @@ def list_findings(limit: int = 200, only_new_since: Optional[str] = None) -> lis
     sql = """
         SELECT eb.email, eb.breach_name, eb.first_seen_at,
                b.title, b.domain, b.breach_date, b.pwn_count, b.data_classes,
-               b.is_sensitive, b.is_verified, b.logo_path
+               b.is_sensitive, b.is_verified, b.is_fabricated, b.is_spam_list,
+               b.is_retired, b.logo_path
         FROM email_breaches eb
         LEFT JOIN breaches b ON b.name = eb.breach_name
     """
@@ -286,8 +289,36 @@ def list_findings(limit: int = 200, only_new_since: Optional[str] = None) -> lis
                 d["data_classes"] = json.loads(d.get("data_classes") or "[]")
             except Exception:
                 d["data_classes"] = []
+            d["severity"] = sev_mod.compute(d)
             out.append(d)
-        return out
+        return sev_mod.by_severity(out)
+
+
+def severity_counts() -> dict:
+    """Count email_breach links bucketed by computed severity level."""
+    with connect() as conn:
+        rows = conn.execute("""
+            SELECT b.data_classes, b.is_sensitive, b.is_verified,
+                   b.is_fabricated, b.is_spam_list, b.is_retired
+              FROM email_breaches eb
+              LEFT JOIN breaches b ON b.name = eb.breach_name
+        """).fetchall()
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for r in rows:
+        try:
+            dc = json.loads(r["data_classes"] or "[]")
+        except Exception:
+            dc = []
+        level = sev_mod.compute({
+            "data_classes": dc,
+            "is_sensitive": r["is_sensitive"],
+            "is_verified": r["is_verified"],
+            "is_fabricated": r["is_fabricated"],
+            "is_spam_list": r["is_spam_list"],
+            "is_retired": r["is_retired"],
+        })["level"]
+        counts[level] = counts.get(level, 0) + 1
+    return counts
 
 
 def list_pastes(limit: int = 200) -> list[dict]:
@@ -300,7 +331,12 @@ def list_pastes(limit: int = 200) -> list[dict]:
             ORDER BY ep.first_seen_at DESC
             LIMIT ?
         """, (limit,)).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["severity"] = sev_mod.compute_paste(d)
+            out.append(d)
+        return out
 
 
 # ── scan runs ─────────────────────────────────────────────────────────────────

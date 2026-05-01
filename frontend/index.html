@@ -32,6 +32,12 @@
         <div class="card"><h3>Total findings</h3><div class="stat" id="stat-findings">—</div></div>
         <div class="card"><h3>Pastes</h3><div class="stat" id="stat-pastes">—</div></div>
       </div>
+      <div class="cards severity-cards">
+        <div class="card sev-card sev-critical"><h3>Critical</h3><div class="stat" id="stat-critical">—</div></div>
+        <div class="card sev-card sev-high"><h3>High</h3><div class="stat" id="stat-high">—</div></div>
+        <div class="card sev-card sev-medium"><h3>Medium</h3><div class="stat" id="stat-medium">—</div></div>
+        <div class="card sev-card sev-low"><h3>Low</h3><div class="stat" id="stat-low">—</div></div>
+      </div>
       <div class="row">
         <div class="card flex">
           <h3>Last run</h3>
@@ -89,7 +95,7 @@
           <button id="findings-refresh">↻ Refresh</button>
         </div>
         <table class="table" id="findings-table">
-          <thead><tr><th>Email</th><th>Breach</th><th>Date</th><th>Pwned</th><th>Data classes</th><th>First seen</th></tr></thead>
+          <thead><tr><th>Severity</th><th>Email</th><th>Breach</th><th>Date</th><th>Pwned</th><th>Data classes</th><th>First seen</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -103,7 +109,7 @@
           <button id="pastes-refresh">↻ Refresh</button>
         </div>
         <table class="table" id="pastes-table">
-          <thead><tr><th>Email</th><th>Source</th><th>Title</th><th>Date</th><th>Emails in paste</th><th>First seen</th></tr></thead>
+          <thead><tr><th>Severity</th><th>Email</th><th>Source</th><th>Title</th><th>Date</th><th>Emails in paste</th><th>First seen</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
