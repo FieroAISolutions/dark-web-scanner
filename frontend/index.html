@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DarkWebScanner</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">🕵️</span>
+      <span>DarkWebScanner</span>
+    </div>
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-tab="dashboard">Dashboard</button>
+      <button class="tab" data-tab="monitor">Monitored</button>
+      <button class="tab" data-tab="findings">Findings</button>
+      <button class="tab" data-tab="pastes">Pastes</button>
+      <button class="tab" data-tab="report">One-shot report</button>
+      <button class="tab" data-tab="config">Config</button>
+    </nav>
+    <div class="ws-status" id="ws-status" title="WebSocket status">●</div>
+  </header>
+
+  <main>
+    <!-- Dashboard ──────────────────────────────────────────────────────────── -->
+    <section class="view" id="view-dashboard">
+      <div class="cards">
+        <div class="card"><h3>Monitored</h3><div class="stat" id="stat-monitored">—</div></div>
+        <div class="card"><h3>Unique breaches</h3><div class="stat" id="stat-breaches">—</div></div>
+        <div class="card"><h3>Total findings</h3><div class="stat" id="stat-findings">—</div></div>
+        <div class="card"><h3>Pastes</h3><div class="stat" id="stat-pastes">—</div></div>
+      </div>
+      <div class="row">
+        <div class="card flex">
+          <h3>Last run</h3>
+          <div id="dash-last-run" class="muted">—</div>
+          <div id="dash-next-run" class="muted small"></div>
+          <div class="actions">
+            <button id="dash-scan-btn" class="primary">🕵️ Scan All Now</button>
+            <span id="dash-scan-status" class="status"></span>
+          </div>
+          <div id="dash-progress" class="progress" style="display:none">
+            <div class="progress-bar"><div class="progress-fill" id="dash-progress-fill"></div></div>
+            <div class="progress-text" id="dash-progress-text"></div>
+          </div>
+        </div>
+        <div class="card flex">
+          <h3>Recent findings</h3>
+          <ul id="dash-recent-findings" class="list"></ul>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Recent runs</h3>
+        <table class="table" id="dash-runs">
+          <thead><tr><th>Started</th><th>Finished</th><th>Emails</th><th>New breaches</th><th>New pastes</th><th>Status</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Monitored ──────────────────────────────────────────────────────────── -->
+    <section class="view" id="view-monitor" hidden>
+      <div class="card">
+        <h3>Add emails</h3>
+        <p class="muted small">Paste one or more addresses (commas, spaces, or newlines work).</p>
+        <textarea id="add-emails-input" rows="4" placeholder="alice@example.com, bob@example.com"></textarea>
+        <div class="actions">
+          <button id="add-emails-btn" class="primary">Add</button>
+          <button id="monitor-scan-btn">🕵️ Scan All Now</button>
+          <span id="monitor-add-status" class="status"></span>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Monitored emails</h3>
+        <table class="table" id="monitor-table">
+          <thead><tr><th>Email</th><th>Added</th><th>Breaches</th><th>Pastes</th><th>Last seen</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Findings ──────────────────────────────────────────────────────────── -->
+    <section class="view" id="view-findings" hidden>
+      <div class="card">
+        <div class="row-spread">
+          <h3>Breach findings</h3>
+          <button id="findings-refresh">↻ Refresh</button>
+        </div>
+        <table class="table" id="findings-table">
+          <thead><tr><th>Email</th><th>Breach</th><th>Date</th><th>Pwned</th><th>Data classes</th><th>First seen</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Pastes ─────────────────────────────────────────────────────────────── -->
+    <section class="view" id="view-pastes" hidden>
+      <div class="card">
+        <div class="row-spread">
+          <h3>Paste findings</h3>
+          <button id="pastes-refresh">↻ Refresh</button>
+        </div>
+        <table class="table" id="pastes-table">
+          <thead><tr><th>Email</th><th>Source</th><th>Title</th><th>Date</th><th>Emails in paste</th><th>First seen</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Report ─────────────────────────────────────────────────────────────── -->
+    <section class="view" id="view-report" hidden>
+      <div class="card">
+        <h3>One-shot report (no persistence)</h3>
+        <p class="muted small">Scans the addresses below without saving to the database. Useful for ad-hoc lookups.</p>
+        <textarea id="report-emails-input" rows="4" placeholder="alice@example.com"></textarea>
+        <div class="actions">
+          <button id="report-run-btn" class="primary">🔍 Generate Report</button>
+          <span id="report-status" class="status"></span>
+        </div>
+      </div>
+      <div class="card" id="report-results-panel" style="display:none">
+        <h3>Results</h3>
+        <div id="report-results"></div>
+      </div>
+    </section>
+
+    <!-- Config ─────────────────────────────────────────────────────────────── -->
+    <section class="view" id="view-config" hidden>
+      <div class="card">
+        <h3>Schedule</h3>
+        <div class="form-row">
+          <label><input type="checkbox" id="cfg-enabled"> Run scheduled scans</label>
+        </div>
+        <div class="form-row">
+          <label>Interval (hours)<br>
+            <input type="number" id="cfg-interval" min="1" max="168" value="6">
+          </label>
+        </div>
+        <div class="form-row">
+          <label>HIBP requests/min (your subscription tier)<br>
+            <input type="number" id="cfg-rpm" min="1" max="500" value="10">
+          </label>
+          <span class="muted small">Pwned 1 = 10, Pwned 2 = 50, Pwned 3 = 100, Pwned 4 = 500</span>
+        </div>
+        <div class="form-row">
+          <label><input type="checkbox" id="cfg-include-pastes"> Include pastes (separate from breaches)</label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>HIBP API key</h3>
+        <div class="form-row">
+          <input type="password" id="cfg-hibp-key" placeholder="leave blank to keep existing key">
+          <div id="cfg-hibp-status" class="muted small"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Alerts</h3>
+        <div class="form-row">
+          <label><input type="checkbox" id="cfg-alert-on-new"> Alert on new findings</label>
+        </div>
+
+        <h4>SMTP</h4>
+        <div class="form-grid">
+          <label>SMTP host<br><input type="text" id="cfg-smtp-host" placeholder="smtp.example.com"></label>
+          <label>Port<br><input type="number" id="cfg-smtp-port" value="587"></label>
+          <label>Username<br><input type="text" id="cfg-smtp-user"></label>
+          <label>Password<br>
+            <input type="password" id="cfg-smtp-pass" placeholder="leave blank to keep">
+            <div id="cfg-smtp-pass-status" class="muted small"></div>
+          </label>
+          <label>From<br><input type="text" id="cfg-from" placeholder="alerts@example.com"></label>
+          <label>To<br><input type="text" id="cfg-to" placeholder="me@example.com"></label>
+        </div>
+
+        <h4>Webhook</h4>
+        <div class="form-grid">
+          <label>Webhook URL<br><input type="text" id="cfg-webhook-url" placeholder="https://hooks.slack.com/..."></label>
+          <label>Format<br>
+            <select id="cfg-webhook-kind">
+              <option value="generic">Generic JSON</option>
+              <option value="slack">Slack</option>
+              <option value="discord">Discord</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="actions">
+          <button id="cfg-save-btn" class="primary">Save</button>
+          <button id="cfg-test-email-btn">Send test email</button>
+          <button id="cfg-test-webhook-btn">Send test webhook</button>
+        </div>
+        <div class="status" id="cfg-schedule-status"></div>
+        <div class="status" id="cfg-alert-status"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

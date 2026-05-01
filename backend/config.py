@@ -1,0 +1,54 @@
+from . import db
+
+
+SECRET_FIELDS = {"hibp_api_key", "smtp_pass"}
+ALLOWED_FIELDS = {
+    "enabled", "interval_hours", "hibp_api_key", "hibp_rpm", "include_pastes",
+    "alert_on_new", "smtp_host", "smtp_port", "smtp_user", "smtp_pass",
+    "from_addr", "to_email", "webhook_url", "webhook_kind", "user_agent",
+}
+WEBHOOK_KINDS = {"slack", "discord", "generic", ""}
+
+
+def get_full() -> dict:
+    """Internal use — includes secrets."""
+    row = db.get_config_row()
+    return dict(row)
+
+
+def get_public() -> dict:
+    """For the UI — secrets replaced with *_set boolean flags."""
+    full = get_full()
+    out = {k: v for k, v in full.items() if k not in SECRET_FIELDS}
+    out["enabled"] = bool(full["enabled"])
+    out["alert_on_new"] = bool(full["alert_on_new"])
+    out["include_pastes"] = bool(full["include_pastes"])
+    out["hibp_api_key_set"] = bool(full["hibp_api_key"])
+    out["smtp_pass_set"] = bool(full["smtp_pass"])
+    return out
+
+
+def update(payload: dict) -> dict:
+    """Apply partial config update. Empty-string secrets preserve existing values."""
+    fields = {}
+    for key, value in payload.items():
+        if key not in ALLOWED_FIELDS:
+            continue
+        if key in SECRET_FIELDS and (value is None or value == ""):
+            continue  # preserve existing secret
+        if key in ("enabled", "alert_on_new", "include_pastes"):
+            value = 1 if bool(value) else 0
+        if key in ("interval_hours", "smtp_port", "hibp_rpm"):
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                continue
+        if key == "webhook_kind" and value not in WEBHOOK_KINDS:
+            value = "generic"
+        if key == "interval_hours" and value < 1:
+            value = 1
+        if key == "hibp_rpm" and value < 1:
+            value = 1
+        fields[key] = value
+    db.update_config(fields)
+    return get_public()
