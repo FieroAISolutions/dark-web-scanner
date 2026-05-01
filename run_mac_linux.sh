@@ -23,6 +23,8 @@ python3 -m pip install -q -r "$BACKEND/requirements.txt"
 PORT="${1:-7070}"
 echo
 echo "  DarkWebScanner starting at http://localhost:${PORT}"
+echo "  On first run, watch for the admin token URL printed below."
+echo "  The token is also saved to: $DATA/admin_token.txt"
 echo "  Press Ctrl+C to stop."
 echo
 

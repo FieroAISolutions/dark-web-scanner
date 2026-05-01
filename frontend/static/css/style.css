@@ -154,3 +154,25 @@ button.danger { color: var(--bad); }
 .report-block.sev-critical h4 { color: var(--bad); }
 .report-block.sev-high     h4 { color: var(--warn); }
 .report-block.sev-medium   h4 { color: #d29922; }
+
+/* Auth ─────────────────────────────────────────────────────────────────────── */
+.overlay {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+}
+.overlay-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 24px;
+  width: 90%; max-width: 480px;
+}
+.overlay-card h2 { margin: 0 0 12px; }
+.overlay-card input { margin-top: 8px; }
+.logout {
+  background: transparent; border: 1px solid transparent;
+  padding: 4px 8px; color: var(--muted); font-size: 16px;
+}
+.logout:hover { color: var(--bad); border-color: var(--bad); }

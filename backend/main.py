@@ -1,6 +1,6 @@
 import asyncio
-import json
 import logging
+import os
 import re
 import sys
 from contextlib import asynccontextmanager
@@ -8,23 +8,32 @@ from pathlib import Path
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import (Depends, FastAPI, HTTPException, Request, Response,
+                     WebSocket, WebSocketDisconnect)
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import alerts, config as config_mod, db, scanner, scheduler as sched_mod
+from . import (alerts, auth, config as config_mod, db, log_redact,
+               scanner, scheduler as sched_mod)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+log_redact.install()
 log = logging.getLogger("dws.main")
 
 ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "frontend"
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+# Hosts that map to this loopback service. Anything else is rejected to defend
+# against DNS-rebinding attacks pointing a foreign hostname at 127.0.0.1.
+ALLOWED_HOST_NAMES = {"localhost", "127.0.0.1"}
+
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
 # ── pubsub for websocket ──────────────────────────────────────────────────────
@@ -93,11 +102,11 @@ async def _execute_scan(emails: list[str], persist: bool) -> dict:
                 if persist and cfg.get("alert_on_new") and (
                     result.new_breach_findings or result.new_paste_findings
                 ):
-                    status = await alerts.alert_new_findings(
+                    status_ = await alerts.alert_new_findings(
                         cfg, result.new_breach_findings, result.new_paste_findings
                     )
                     await hub.broadcast({
-                        "type": "alert_sent", "run_id": result.run_id, "status": status,
+                        "type": "alert_sent", "run_id": result.run_id, "status": status_,
                     })
         finally:
             if not run_id_fut.done():
@@ -112,7 +121,6 @@ async def _execute_scan(emails: list[str], persist: bool) -> dict:
 
 
 async def _scheduled_run() -> None:
-    """Called by APScheduler — scans all monitored emails."""
     cfg = config_mod.get_full()
     if not cfg.get("hibp_api_key"):
         log.warning("scheduled scan skipped: no API key")
@@ -135,11 +143,11 @@ async def _scheduled_run() -> None:
         if cfg.get("alert_on_new") and (
             result.new_breach_findings or result.new_paste_findings
         ):
-            status = await alerts.alert_new_findings(
+            status_ = await alerts.alert_new_findings(
                 cfg, result.new_breach_findings, result.new_paste_findings
             )
             await hub.broadcast({
-                "type": "alert_sent", "run_id": result.run_id, "status": status,
+                "type": "alert_sent", "run_id": result.run_id, "status": status_,
             })
 
 
@@ -148,9 +156,29 @@ scheduler = sched_mod.ScanScheduler(_scheduled_run)
 
 # ── lifespan ──────────────────────────────────────────────────────────────────
 
+def _print_setup_banner(token: str, port: int) -> None:
+    bar = "─" * 70
+    msg = (
+        f"\n{bar}\n"
+        f"  DarkWebScanner — first-run admin token created.\n\n"
+        f"  Open this URL once to authenticate (token will be set as a cookie):\n"
+        f"    http://localhost:{port}/?token={token}\n\n"
+        f"  Token also saved to: {auth.TOKEN_FILE}\n"
+        f"  KEEP THIS FILE SAFE. Anyone with it can read your scanner data.\n"
+        f"{bar}\n"
+    )
+    print(msg, flush=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init()
+    config_mod.migrate_legacy_secrets()
+    new_token = auth.ensure_initial_token()
+    if new_token:
+        port = getattr(app.state, "port", None) or int(os.environ.get("DWS_PORT", "7070"))
+        _print_setup_banner(new_token, port)
+
     cfg = config_mod.get_full()
     scheduler.start()
     scheduler.apply(enabled=bool(cfg["enabled"]), interval_hours=cfg["interval_hours"])
@@ -164,6 +192,64 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="DarkWebScanner", lifespan=lifespan)
 
 
+# ── middlewares ───────────────────────────────────────────────────────────────
+
+@app.middleware("http")
+async def host_and_csrf_guard(request: Request, call_next):
+    """
+    Rejects non-loopback Host headers (DNS rebinding defence) and validates the
+    Origin header on state-changing requests (CSRF defence). Static and
+    websocket endpoints follow the same rules.
+    """
+    host_header = (request.headers.get("host") or "").split(":")[0].lower()
+    if host_header and host_header not in ALLOWED_HOST_NAMES:
+        return Response(status_code=400, content="invalid Host header")
+
+    if request.method not in SAFE_METHODS:
+        origin = request.headers.get("origin")
+        if origin:
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(origin)
+                if parsed.hostname not in ALLOWED_HOST_NAMES:
+                    return Response(status_code=403, content="invalid Origin")
+            except Exception:
+                return Response(status_code=403, content="invalid Origin")
+        # If no Origin header at all, the caller is non-browser — that's fine,
+        # they'll still need a valid auth token to do anything.
+
+    response = await call_next(request)
+    return response
+
+
+SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "connect-src 'self' ws: wss:; "
+        "img-src 'self' data:; "
+        "frame-ancestors 'none'; "
+        "form-action 'self'; "
+        "base-uri 'self'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for k, v in SECURITY_HEADERS.items():
+        response.headers.setdefault(k, v)
+    return response
+
+
 # ── models ────────────────────────────────────────────────────────────────────
 
 class EmailListReq(BaseModel):
@@ -175,22 +261,67 @@ class ScanReq(BaseModel):
     persist: bool = True
 
 
-# ── routes: static + index ────────────────────────────────────────────────────
+class LoginReq(BaseModel):
+    token: str
+
+
+# ── routes: index + static ────────────────────────────────────────────────────
 
 @app.get("/")
-async def index():
+async def index(request: Request):
+    """
+    Serves the SPA. If a `?token=` query param is supplied and valid, sets the
+    auth cookie and redirects to a clean URL so the token doesn't sit in
+    browser history.
+    """
+    qs_token = request.query_params.get("token")
+    if qs_token and auth.verify(qs_token):
+        resp = RedirectResponse(url="/", status_code=303)
+        resp.set_cookie(value=qs_token, **auth.cookie_kwargs())
+        return resp
     return FileResponse(FRONTEND / "index.html")
 
 
 app.mount("/static", StaticFiles(directory=FRONTEND / "static"), name="static")
 
 
-@app.get("/api/health")
-async def health():
+# ── routes: auth ──────────────────────────────────────────────────────────────
+
+@app.get("/api/auth/status")
+async def auth_status(request: Request):
+    return {"authenticated": auth.verify(auth.extract_token(request))}
+
+
+@app.post("/api/auth/login")
+async def auth_login(payload: LoginReq, response: Response):
+    if not auth.verify(payload.token or ""):
+        raise HTTPException(status_code=401, detail="invalid token")
+    response.set_cookie(value=payload.token, **auth.cookie_kwargs())
     return {"ok": True}
 
 
-# ── routes: emails ────────────────────────────────────────────────────────────
+@app.post("/api/auth/logout")
+async def auth_logout(response: Response):
+    response.delete_cookie(key=auth.TOKEN_COOKIE, path="/")
+    return {"ok": True}
+
+
+@app.post("/api/auth/regenerate", dependencies=[Depends(auth.require_auth)])
+async def auth_regenerate(response: Response):
+    new_token = auth.regenerate_token()
+    response.set_cookie(value=new_token, **auth.cookie_kwargs())
+    return {"ok": True, "token": new_token, "saved_to": str(auth.TOKEN_FILE)}
+
+
+# ── routes: protected API ─────────────────────────────────────────────────────
+
+protected = [Depends(auth.require_auth)]
+
+
+@app.get("/api/health", dependencies=protected)
+async def health():
+    return {"ok": True}
+
 
 def _normalize_emails(items: list[str]) -> tuple[list[str], list[str]]:
     valid, invalid = [], []
@@ -209,12 +340,12 @@ def _normalize_emails(items: list[str]) -> tuple[list[str], list[str]]:
     return valid, invalid
 
 
-@app.get("/api/emails")
+@app.get("/api/emails", dependencies=protected)
 async def api_list_emails():
     return {"emails": db.list_emails()}
 
 
-@app.post("/api/emails")
+@app.post("/api/emails", dependencies=protected)
 async def api_add_emails(req: EmailListReq):
     valid, invalid = _normalize_emails(req.emails)
     if not valid:
@@ -224,7 +355,7 @@ async def api_add_emails(req: EmailListReq):
     return {"added": added, "skipped": skipped, "invalid": invalid}
 
 
-@app.delete("/api/emails/{email}")
+@app.delete("/api/emails/{email}", dependencies=protected)
 async def api_remove_email(email: str):
     e = email.strip().lower()
     ok = db.remove_email(e)
@@ -233,9 +364,7 @@ async def api_remove_email(email: str):
     return {"removed": e}
 
 
-# ── routes: dashboard / findings ──────────────────────────────────────────────
-
-@app.get("/api/dashboard")
+@app.get("/api/dashboard", dependencies=protected)
 async def api_dashboard():
     stats = db.dashboard_stats()
     stats["next_run_at"] = scheduler.next_run_time()
@@ -246,22 +375,22 @@ async def api_dashboard():
     return stats
 
 
-@app.get("/api/findings")
+@app.get("/api/findings", dependencies=protected)
 async def api_findings(limit: int = 200):
     return {"findings": db.list_findings(limit=min(max(limit, 1), 1000))}
 
 
-@app.get("/api/pastes")
+@app.get("/api/pastes", dependencies=protected)
 async def api_pastes(limit: int = 200):
     return {"pastes": db.list_pastes(limit=min(max(limit, 1), 1000))}
 
 
-@app.get("/api/scan/runs")
+@app.get("/api/scan/runs", dependencies=protected)
 async def api_runs(limit: int = 20):
     return {"runs": db.recent_runs(limit=min(max(limit, 1), 100))}
 
 
-@app.get("/api/scan/runs/{run_id}")
+@app.get("/api/scan/runs/{run_id}", dependencies=protected)
 async def api_run(run_id: int):
     row = db.get_run(run_id)
     if not row:
@@ -269,9 +398,7 @@ async def api_run(run_id: int):
     return row
 
 
-# ── routes: scan ──────────────────────────────────────────────────────────────
-
-@app.post("/api/scan")
+@app.post("/api/scan", dependencies=protected)
 async def api_scan(req: ScanReq):
     if req.emails is not None:
         valid, invalid = _normalize_emails(req.emails)
@@ -286,14 +413,12 @@ async def api_scan(req: ScanReq):
     return await _execute_scan(emails, persist=bool(req.persist))
 
 
-# ── routes: config ────────────────────────────────────────────────────────────
-
-@app.get("/api/config")
+@app.get("/api/config", dependencies=protected)
 async def api_get_config():
     return config_mod.get_public()
 
 
-@app.post("/api/config")
+@app.post("/api/config", dependencies=protected)
 async def api_update_config(payload: dict):
     new_pub = config_mod.update(payload)
     cfg_full = config_mod.get_full()
@@ -305,7 +430,7 @@ async def api_update_config(payload: dict):
     return new_pub
 
 
-@app.post("/api/config/test-email")
+@app.post("/api/config/test-email", dependencies=protected)
 async def api_test_email():
     cfg = config_mod.get_full()
     try:
@@ -321,7 +446,7 @@ async def api_test_email():
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.post("/api/config/test-webhook")
+@app.post("/api/config/test-webhook", dependencies=protected)
 async def api_test_webhook():
     cfg = config_mod.get_full()
     try:
@@ -340,12 +465,18 @@ async def api_test_webhook():
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
+    # Authenticate the WS connection from the cookie or query param BEFORE accepting.
+    token = (ws.cookies.get(auth.TOKEN_COOKIE)
+             or ws.query_params.get("token")
+             or "")
+    if not auth.verify(token):
+        await ws.close(code=1008)
+        return
     await ws.accept()
     await hub.add(ws)
     try:
         await ws.send_json({"type": "hello", "ok": True})
         while True:
-            # We don't expect client messages; just wait. Any message keeps it alive.
             try:
                 await asyncio.wait_for(ws.receive_text(), timeout=30.0)
             except asyncio.TimeoutError:
@@ -368,6 +499,8 @@ def main():
             port = int(sys.argv[1])
         except ValueError:
             pass
+    os.environ["DWS_PORT"] = str(port)
+    app.state.port = port
     uvicorn.run(
         "backend.main:app",
         host="127.0.0.1",

@@ -16,7 +16,11 @@ function _parseEmails(raw) {
 }
 
 async function _apiFetch(url, opts = {}) {
-  const r = await fetch(url, opts);
+  const r = await fetch(url, { credentials: 'same-origin', ...opts });
+  if (r.status === 401) {
+    showLogin();
+    throw new Error('not authenticated');
+  }
   if (!r.ok) {
     let msg = r.statusText;
     try {
@@ -70,6 +74,12 @@ function initNav() {
     if (id === 'cfg-save-btn')           btn.addEventListener('click', saveConfig);
     if (id === 'cfg-test-email-btn')     btn.addEventListener('click', testEmail);
     if (id === 'cfg-test-webhook-btn')   btn.addEventListener('click', testWebhook);
+    if (id === 'cfg-regen-btn')          btn.addEventListener('click', regenerateToken);
+    if (id === 'login-btn')              btn.addEventListener('click', login);
+    if (id === 'logout-btn')             btn.addEventListener('click', logout);
+  });
+  $('login-token')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') login();
   });
 }
 
@@ -596,12 +606,91 @@ async function testWebhook() {
   }
 }
 
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+function showLogin() {
+  $('login-overlay').hidden = false;
+  setTimeout(() => $('login-token')?.focus(), 50);
+}
+
+function hideLogin() {
+  $('login-overlay').hidden = true;
+}
+
+async function login() {
+  const token = ($('login-token').value || '').trim();
+  if (!token) {
+    _setStatus('login-status', 'Enter your admin token.', '#f85149');
+    return;
+  }
+  try {
+    _setStatus('login-status', 'Signing in…', '');
+    const r = await fetch('/api/auth/login', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(j.detail || 'invalid token');
+    }
+    $('login-token').value = '';
+    _setStatus('login-status', '', '');
+    hideLogin();
+    bootApp();
+  } catch (e) {
+    _setStatus('login-status', e.message, '#f85149');
+  }
+}
+
+async function logout() {
+  if (!confirm('Sign out of DarkWebScanner?')) return;
+  try {
+    await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+  } catch {}
+  showLogin();
+  if (_ws) { try { _ws.close(); } catch {} }
+}
+
+async function regenerateToken() {
+  if (!confirm('Generate a new admin token? The old token will stop working immediately.')) return;
+  _setStatus('cfg-token-status', 'Regenerating…', '');
+  try {
+    const r = await _apiFetch('/api/auth/regenerate', { method: 'POST' });
+    const d = await r.json();
+    _setStatus('cfg-token-status',
+      `New token saved to ${d.saved_to}. You're already signed in here.`,
+      '#3fb950');
+  } catch (e) {
+    _setStatus('cfg-token-status', 'Error: ' + e.message, '#f85149');
+  }
+}
+
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
-document.addEventListener('DOMContentLoaded', () => {
-  initNav();
+async function bootApp() {
   connectWebSocket();
   loadDashboard();
   loadEmails();
   loadConfig();
-});
+}
+
+async function bootstrap() {
+  initNav();
+  // The server-side `/?token=` handler sets the cookie via redirect, so by
+  // the time this script runs we should already be authenticated. Probe once.
+  try {
+    const r = await fetch('/api/auth/status', { credentials: 'same-origin' });
+    const d = await r.json();
+    if (d.authenticated) {
+      bootApp();
+    } else {
+      showLogin();
+    }
+  } catch {
+    showLogin();
+  }
+}
+
+document.addEventListener('DOMContentLoaded', bootstrap);

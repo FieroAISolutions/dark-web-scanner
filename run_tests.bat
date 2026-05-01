@@ -2,9 +2,6 @@
 setlocal enabledelayedexpansion
 set SCRIPT_DIR=%~dp0
 set BACKEND=%SCRIPT_DIR%backend
-set DATA=%SCRIPT_DIR%data
-
-if not exist "%DATA%" mkdir "%DATA%"
 
 cd /d "%SCRIPT_DIR%"
 
@@ -22,17 +19,6 @@ if not exist "%BACKEND%\.venv" (
 
 call "%BACKEND%\.venv\Scripts\activate.bat"
 python -m pip install -q --upgrade pip
-python -m pip install -q -r "%BACKEND%\requirements.txt"
+python -m pip install -q -r "%BACKEND%\requirements-dev.txt"
 
-set PORT=%1
-if "%PORT%"=="" set PORT=7070
-
-echo.
-echo   DarkWebScanner starting at http://localhost:%PORT%
-echo   On first run, watch for the admin token URL printed below.
-echo   The token is also saved to: %DATA%\admin_token.txt
-echo   Press Ctrl+C to stop.
-echo.
-
-python -m backend.main %PORT%
-pause
+python -m pytest %*

@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Optional
 
-from . import severity as sev_mod
+from . import secrets_store, severity as sev_mod
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "scanner.db"
 _write_lock = threading.Lock()
@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS config (
     to_email TEXT NOT NULL DEFAULT '',
     webhook_url TEXT NOT NULL DEFAULT '',
     webhook_kind TEXT NOT NULL DEFAULT 'generic',
-    user_agent TEXT NOT NULL DEFAULT 'DarkWebScanner/1.0'
+    user_agent TEXT NOT NULL DEFAULT 'DarkWebScanner/1.0',
+    admin_token_hash TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS monitored_emails (
@@ -94,14 +95,50 @@ CREATE INDEX IF NOT EXISTS idx_scan_runs_started    ON scan_runs(started_at DESC
 """
 
 
+_EXPECTED_CONFIG_COLUMNS = {
+    "enabled": "INTEGER NOT NULL DEFAULT 0",
+    "interval_hours": "INTEGER NOT NULL DEFAULT 6",
+    "hibp_api_key": "TEXT NOT NULL DEFAULT ''",
+    "hibp_rpm": "INTEGER NOT NULL DEFAULT 10",
+    "include_pastes": "INTEGER NOT NULL DEFAULT 1",
+    "alert_on_new": "INTEGER NOT NULL DEFAULT 1",
+    "smtp_host": "TEXT NOT NULL DEFAULT ''",
+    "smtp_port": "INTEGER NOT NULL DEFAULT 587",
+    "smtp_user": "TEXT NOT NULL DEFAULT ''",
+    "smtp_pass": "TEXT NOT NULL DEFAULT ''",
+    "from_addr": "TEXT NOT NULL DEFAULT ''",
+    "to_email": "TEXT NOT NULL DEFAULT ''",
+    "webhook_url": "TEXT NOT NULL DEFAULT ''",
+    "webhook_kind": "TEXT NOT NULL DEFAULT 'generic'",
+    "user_agent": "TEXT NOT NULL DEFAULT 'DarkWebScanner/1.0'",
+    "admin_token_hash": "TEXT NOT NULL DEFAULT ''",
+}
+
+
+def _migrate_config_columns(conn: sqlite3.Connection) -> None:
+    """Add any missing columns to existing config tables (forward-compat)."""
+    rows = conn.execute("PRAGMA table_info(config)").fetchall()
+    existing = {r["name"] for r in rows}
+    for col, ddl in _EXPECTED_CONFIG_COLUMNS.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE config ADD COLUMN {col} {ddl}")
+
+
 def init() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _migrate_config_columns(conn)
         cur = conn.execute("SELECT COUNT(*) FROM config")
         if cur.fetchone()[0] == 0:
             conn.execute("INSERT INTO config (id) VALUES (1)")
         conn.commit()
+    # Tighten DB file perms to owner-only (best-effort, no-op on Windows).
+    secrets_store.restrict_path(DB_PATH)
+    for ext in ("-wal", "-shm"):
+        sidecar = DB_PATH.with_name(DB_PATH.name + ext)
+        if sidecar.exists():
+            secrets_store.restrict_path(sidecar)
 
 
 @contextmanager

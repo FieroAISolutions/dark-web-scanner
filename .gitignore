@@ -2,11 +2,13 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+.venv-test/
 backend/.venv/
 data/
 *.db
 *.db-wal
 *.db-shm
+.pytest_cache/
 .DS_Store
 .vscode/
 .idea/

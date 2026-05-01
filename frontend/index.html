@@ -7,6 +7,21 @@
   <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
+  <div id="login-overlay" class="overlay" hidden>
+    <div class="overlay-card">
+      <h2>🔒 DarkWebScanner — sign in</h2>
+      <p class="muted small">
+        Paste the admin token from <code>data/admin_token.txt</code> (or the
+        URL printed in your console on first run).
+      </p>
+      <input type="password" id="login-token" placeholder="Admin token" autocomplete="off">
+      <div class="actions">
+        <button id="login-btn" class="primary">Sign in</button>
+        <span id="login-status" class="status"></span>
+      </div>
+    </div>
+  </div>
+
   <header class="topbar">
     <div class="brand">
       <span class="logo">🕵️</span>
@@ -20,6 +35,7 @@
       <button class="tab" data-tab="report">One-shot report</button>
       <button class="tab" data-tab="config">Config</button>
     </nav>
+    <button id="logout-btn" class="logout" title="Sign out">⎋</button>
     <div class="ws-status" id="ws-status" title="WebSocket status">●</div>
   </header>
 
@@ -201,6 +217,19 @@
         </div>
         <div class="status" id="cfg-schedule-status"></div>
         <div class="status" id="cfg-alert-status"></div>
+      </div>
+
+      <div class="card">
+        <h3>Admin token</h3>
+        <p class="muted small">
+          Regenerating issues a new token, invalidates the old one, and writes
+          the new value to <code>data/admin_token.txt</code>. You stay signed in
+          on this device.
+        </p>
+        <div class="actions">
+          <button id="cfg-regen-btn" class="danger">Regenerate token</button>
+          <span id="cfg-token-status" class="status"></span>
+        </div>
       </div>
     </section>
   </main>
