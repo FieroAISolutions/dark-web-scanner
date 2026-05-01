@@ -11,13 +11,35 @@
     <div class="overlay-card">
       <h2>🔒 DarkWebScanner — sign in</h2>
       <p class="muted small">
-        Paste the admin token from <code>data/admin_token.txt</code> (or the
-        URL printed in your console on first run).
+        Enter your password — or, on first run, the recovery token from
+        <code>data/admin_token.txt</code> (also printed in the server console).
       </p>
-      <input type="password" id="login-token" placeholder="Admin token" autocomplete="off">
+      <input type="password" id="login-token" placeholder="Password or recovery token" autocomplete="current-password">
       <div class="actions">
         <button id="login-btn" class="primary">Sign in</button>
         <span id="login-status" class="status"></span>
+      </div>
+    </div>
+  </div>
+
+  <div id="setpw-overlay" class="overlay" hidden>
+    <div class="overlay-card">
+      <h2>Set a password?</h2>
+      <p class="muted small">
+        You signed in with the recovery token. Set a password now so you don't
+        have to dig out the token next time. The recovery token still works
+        for emergency access.
+      </p>
+      <label class="form-row">New password (8+ chars)
+        <input type="password" id="setpw-new" autocomplete="new-password">
+      </label>
+      <label class="form-row">Confirm
+        <input type="password" id="setpw-confirm" autocomplete="new-password">
+      </label>
+      <div class="actions">
+        <button id="setpw-save-btn" class="primary">Set password</button>
+        <button id="setpw-skip-btn">Maybe later</button>
+        <span id="setpw-status" class="status"></span>
       </div>
     </div>
   </div>
@@ -220,14 +242,35 @@
       </div>
 
       <div class="card">
-        <h3>Admin token</h3>
+        <h3>Sign-in</h3>
+        <p class="muted small" id="cfg-pw-state">—</p>
+        <div class="form-grid">
+          <label>Current password (only when one is already set)<br>
+            <input type="password" id="cfg-pw-current" autocomplete="current-password">
+          </label>
+          <label>New password<br>
+            <input type="password" id="cfg-pw-new" autocomplete="new-password">
+          </label>
+          <label>Confirm new password<br>
+            <input type="password" id="cfg-pw-confirm" autocomplete="new-password">
+          </label>
+        </div>
+        <div class="actions">
+          <button id="cfg-pw-save-btn" class="primary">Set / change password</button>
+          <button id="cfg-pw-clear-btn" class="danger">Clear password</button>
+          <span id="cfg-pw-status" class="status"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Recovery token</h3>
         <p class="muted small">
-          Regenerating issues a new token, invalidates the old one, and writes
-          the new value to <code>data/admin_token.txt</code>. You stay signed in
-          on this device.
+          Regenerating issues a new recovery token, invalidates every signed-in
+          browser (including this one — you'll have to sign back in), and writes
+          the new value to <code>data/admin_token.txt</code>.
         </p>
         <div class="actions">
-          <button id="cfg-regen-btn" class="danger">Regenerate token</button>
+          <button id="cfg-regen-btn" class="danger">Regenerate recovery token</button>
           <span id="cfg-token-status" class="status"></span>
         </div>
       </div>

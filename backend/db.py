@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS config (
     webhook_url TEXT NOT NULL DEFAULT '',
     webhook_kind TEXT NOT NULL DEFAULT 'generic',
     user_agent TEXT NOT NULL DEFAULT 'DarkWebScanner/1.0',
-    admin_token_hash TEXT NOT NULL DEFAULT ''
+    admin_token_hash TEXT NOT NULL DEFAULT '',
+    admin_password_hash TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS monitored_emails (
@@ -112,6 +113,7 @@ _EXPECTED_CONFIG_COLUMNS = {
     "webhook_kind": "TEXT NOT NULL DEFAULT 'generic'",
     "user_agent": "TEXT NOT NULL DEFAULT 'DarkWebScanner/1.0'",
     "admin_token_hash": "TEXT NOT NULL DEFAULT ''",
+    "admin_password_hash": "TEXT NOT NULL DEFAULT ''",
 }
 
 

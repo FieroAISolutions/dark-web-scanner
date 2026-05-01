@@ -75,8 +75,12 @@ function initNav() {
     if (id === 'cfg-test-email-btn')     btn.addEventListener('click', testEmail);
     if (id === 'cfg-test-webhook-btn')   btn.addEventListener('click', testWebhook);
     if (id === 'cfg-regen-btn')          btn.addEventListener('click', regenerateToken);
+    if (id === 'cfg-pw-save-btn')        btn.addEventListener('click', savePassword);
+    if (id === 'cfg-pw-clear-btn')       btn.addEventListener('click', clearPassword);
     if (id === 'login-btn')              btn.addEventListener('click', login);
     if (id === 'logout-btn')             btn.addEventListener('click', logout);
+    if (id === 'setpw-save-btn')         btn.addEventListener('click', () => savePasswordModal());
+    if (id === 'setpw-skip-btn')         btn.addEventListener('click', () => $('setpw-overlay').hidden = true);
   });
   $('login-token')?.addEventListener('keydown', e => {
     if (e.key === 'Enter') login();
@@ -94,7 +98,7 @@ function switchTab(name) {
   if (name === 'monitor')   loadEmails();
   if (name === 'findings')  loadFindings('findings');
   if (name === 'pastes')    loadPastes();
-  if (name === 'config')    loadConfig();
+  if (name === 'config')    { loadConfig(); refreshAuthState(); }
 }
 
 // ── WebSocket ──────────────────────────────────────────────────────────────────
@@ -618,9 +622,9 @@ function hideLogin() {
 }
 
 async function login() {
-  const token = ($('login-token').value || '').trim();
-  if (!token) {
-    _setStatus('login-status', 'Enter your admin token.', '#f85149');
+  const credential = ($('login-token').value || '').trim();
+  if (!credential) {
+    _setStatus('login-status', 'Enter your password or recovery token.', '#f85149');
     return;
   }
   try {
@@ -629,19 +633,19 @@ async function login() {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ token: credential }),
     });
     if (!r.ok) {
       const j = await r.json().catch(() => ({}));
-      throw new Error(j.detail || 'invalid token');
+      throw new Error(j.detail || 'invalid credential');
     }
-    // Verify the cookie actually stuck before booting the app — a 200 here
-    // only means the token is valid, not that the browser stored the cookie.
+    const loginData = await r.json().catch(() => ({}));
+
     const probe = await fetch('/api/auth/status', { credentials: 'same-origin' });
     const pd = await probe.json().catch(() => ({}));
     if (!pd.authenticated) {
       throw new Error(
-        'Token accepted, but the session cookie did not persist. ' +
+        'Credential accepted, but the session cookie did not persist. ' +
         'Check browser cookie / privacy settings for localhost and retry.'
       );
     }
@@ -649,6 +653,11 @@ async function login() {
     _setStatus('login-status', '', '');
     hideLogin();
     bootApp();
+    // First-run nudge: if they signed in with the recovery token and no
+    // password is configured, prompt to set one.
+    if (loginData.method === 'token' && !pd.password_set) {
+      showSetPasswordModal();
+    }
   } catch (e) {
     _setStatus('login-status', e.message, '#f85149');
   }
@@ -664,16 +673,111 @@ async function logout() {
 }
 
 async function regenerateToken() {
-  if (!confirm('Generate a new admin token? The old token will stop working immediately.')) return;
+  if (!confirm('Generate a new recovery token? The old one will stop working immediately ' +
+               'and any browser signed in with it (including this one) will be logged out.')) return;
   _setStatus('cfg-token-status', 'Regenerating…', '');
   try {
     const r = await _apiFetch('/api/auth/regenerate', { method: 'POST' });
     const d = await r.json();
     _setStatus('cfg-token-status',
-      `New token saved to ${d.saved_to}. You're already signed in here.`,
+      `New recovery token saved to ${d.saved_to}.`,
       '#3fb950');
   } catch (e) {
     _setStatus('cfg-token-status', 'Error: ' + e.message, '#f85149');
+  }
+}
+
+// ── Password ──────────────────────────────────────────────────────────────────
+
+function showSetPasswordModal() {
+  $('setpw-new').value = '';
+  $('setpw-confirm').value = '';
+  _setStatus('setpw-status', '', '');
+  $('setpw-overlay').hidden = false;
+  setTimeout(() => $('setpw-new')?.focus(), 50);
+}
+
+async function savePasswordModal() {
+  const pw = $('setpw-new').value;
+  const conf = $('setpw-confirm').value;
+  if (pw.length < 8) {
+    _setStatus('setpw-status', 'Password must be at least 8 characters.', '#f85149');
+    return;
+  }
+  if (pw !== conf) {
+    _setStatus('setpw-status', 'Passwords do not match.', '#f85149');
+    return;
+  }
+  try {
+    _setStatus('setpw-status', 'Saving…', '');
+    await _apiFetch('/api/auth/set-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw }),
+    });
+    $('setpw-overlay').hidden = true;
+    if (document.querySelector('.tab.active')?.dataset.tab === 'config') refreshAuthState();
+  } catch (e) {
+    _setStatus('setpw-status', 'Error: ' + e.message, '#f85149');
+  }
+}
+
+async function refreshAuthState() {
+  try {
+    const r = await fetch('/api/auth/status', { credentials: 'same-origin' });
+    const d = await r.json();
+    const el = $('cfg-pw-state');
+    if (el) {
+      el.textContent = d.password_set
+        ? 'A password is set. Daily sign-in uses the password; the recovery token still works as backup.'
+        : 'No password set. You are using the recovery token to sign in. Set a password below for easier daily access.';
+    }
+  } catch {}
+}
+
+async function savePassword() {
+  const cur = $('cfg-pw-current').value;
+  const pw = $('cfg-pw-new').value;
+  const conf = $('cfg-pw-confirm').value;
+  if (pw.length < 8) {
+    _setStatus('cfg-pw-status', 'Password must be at least 8 characters.', '#f85149');
+    return;
+  }
+  if (pw !== conf) {
+    _setStatus('cfg-pw-status', 'Passwords do not match.', '#f85149');
+    return;
+  }
+  try {
+    _setStatus('cfg-pw-status', 'Saving…', '');
+    await _apiFetch('/api/auth/set-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw, current: cur || null }),
+    });
+    _setStatus('cfg-pw-status', 'Password saved.', '#3fb950');
+    ['cfg-pw-current', 'cfg-pw-new', 'cfg-pw-confirm'].forEach(id => $(id).value = '');
+    refreshAuthState();
+    setTimeout(() => _setStatus('cfg-pw-status', '', ''), 4000);
+  } catch (e) {
+    _setStatus('cfg-pw-status', 'Error: ' + e.message, '#f85149');
+  }
+}
+
+async function clearPassword() {
+  if (!confirm('Remove the password? After this, only the recovery token signs you in.')) return;
+  const cur = $('cfg-pw-current').value;
+  try {
+    _setStatus('cfg-pw-status', 'Clearing…', '');
+    await _apiFetch('/api/auth/clear-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ current: cur || null }),
+    });
+    _setStatus('cfg-pw-status', 'Password cleared.', '#3fb950');
+    ['cfg-pw-current', 'cfg-pw-new', 'cfg-pw-confirm'].forEach(id => $(id).value = '');
+    refreshAuthState();
+  } catch (e) {
+    _setStatus('cfg-pw-status', 'Error: ' + e.message, '#f85149');
   }
 }
 

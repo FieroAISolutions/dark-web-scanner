@@ -4,9 +4,9 @@ from backend import auth
 def test_token_generated_and_verifies():
     plain = auth.ensure_initial_token()
     assert plain
-    assert auth.verify(plain)
-    assert not auth.verify("not-the-right-token")
-    assert not auth.verify("")
+    assert auth.verify_token(plain)
+    assert not auth.verify_token("not-the-right-token")
+    assert not auth.verify_token("")
 
 
 def test_ensure_initial_token_idempotent():
@@ -20,8 +20,8 @@ def test_regenerate_invalidates_old():
     old = auth.ensure_initial_token()
     new = auth.regenerate_token()
     assert old != new
-    assert auth.verify(new)
-    assert not auth.verify(old)
+    assert auth.verify_token(new)
+    assert not auth.verify_token(old)
 
 
 def test_protected_route_requires_token(anon_client):

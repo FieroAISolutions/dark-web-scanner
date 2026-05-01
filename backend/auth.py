@@ -1,16 +1,23 @@
 """
-Token-based auth for the local web UI.
+Auth for the local web UI.
 
-A 256-bit URL-safe token is generated on first run, hashed (SHA-256) into
-the config DB, and printed plaintext to `data/admin_token.txt` (0600). The
-plaintext can be supplied via:
+Two credentials are supported:
 
-  • a `dws_token` HttpOnly SameSite=Strict cookie (set by the login endpoint),
-  • an `?token=…` query parameter (e.g. on the very first visit),
-  • or an `X-Auth-Token` request header (for API clients).
+  • A 256-bit URL-safe **recovery token**, generated on first run, hashed
+    (SHA-256) into the config DB and written plaintext to
+    `data/admin_token.txt` (0600). Designed for emergency / first-run
+    access — supplied via `?token=…`, an `X-Auth-Token` header, or the
+    login form.
 
-The token cannot be brute-forced over the wire (256-bit random), so we
-just SHA-256 it; PBKDF2/bcrypt are not required for high-entropy tokens.
+  • An optional **password** (bcrypt-hashed). When a password is set,
+    operators can sign in with it from the login form. After successful
+    sign-in (whether by token or password), the cookie always carries
+    the recovery token, so per-request verification stays cheap (single
+    SHA-256 compare instead of bcrypt).
+
+The recovery token is therefore both an emergency credential and the
+session value. Regenerating it logs out every browser. Setting/clearing
+the password does not log anybody out.
 """
 
 from __future__ import annotations
@@ -21,7 +28,8 @@ import secrets as _secrets
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Cookie, HTTPException, Query, Request, status
+import bcrypt
+from fastapi import HTTPException, Request, status
 
 from . import db, secrets_store
 
@@ -31,59 +39,113 @@ TOKEN_COOKIE = "dws_token"
 TOKEN_FILE = Path(__file__).resolve().parent.parent / "data" / "admin_token.txt"
 COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 
+MIN_PASSWORD_LEN = 8
 
-def _hash(token: str) -> str:
+
+# ── token (recovery + session) ────────────────────────────────────────────────
+
+def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def _stored_hash() -> str:
+def _stored_token_hash() -> str:
     return (db.get_config_row()["admin_token_hash"] or "").strip()
 
 
-def _set_hash(h: str) -> None:
+def _set_token_hash(h: str) -> None:
     db.update_config({"admin_token_hash": h})
 
 
 def ensure_initial_token() -> Optional[str]:
-    """
-    Make sure an admin token exists. Returns the plaintext token IF a new one
-    was just generated (so callers can surface it in the console). Returns
-    None when an existing token is in place.
-    """
-    if _stored_hash():
+    """Generate-and-persist on first run. Returns the plaintext only when newly created."""
+    if _stored_token_hash():
         return None
     plain = _secrets.token_urlsafe(32)
-    _set_hash(_hash(plain))
+    _set_token_hash(_hash_token(plain))
+    _write_token_file(plain)
+    return plain
+
+
+def regenerate_token() -> str:
+    plain = _secrets.token_urlsafe(32)
+    _set_token_hash(_hash_token(plain))
+    _write_token_file(plain)
+    return plain
+
+
+def _write_token_file(plain: str) -> None:
     try:
         TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
         TOKEN_FILE.write_text(plain + "\n", encoding="utf-8")
         secrets_store.restrict_path(TOKEN_FILE)
     except OSError:
         log.warning("could not write admin token file at %s", TOKEN_FILE)
-    return plain
 
 
-def regenerate_token() -> str:
-    plain = _secrets.token_urlsafe(32)
-    _set_hash(_hash(plain))
+def read_recovery_token() -> str:
+    """Return the plaintext recovery token from disk, or empty if unavailable."""
     try:
-        TOKEN_FILE.write_text(plain + "\n", encoding="utf-8")
-        secrets_store.restrict_path(TOKEN_FILE)
+        if TOKEN_FILE.exists():
+            return TOKEN_FILE.read_text(encoding="utf-8").strip()
     except OSError:
-        log.warning("could not write admin token file at %s", TOKEN_FILE)
-    return plain
+        pass
+    return ""
 
 
-def verify(provided: str) -> bool:
+def verify_token(provided: str) -> bool:
     if not provided:
         return False
-    expected = _stored_hash()
+    expected = _stored_token_hash()
     if not expected:
         return False
-    return _secrets.compare_digest(_hash(provided), expected)
+    return _secrets.compare_digest(_hash_token(provided), expected)
+
+
+# ── password ──────────────────────────────────────────────────────────────────
+
+def _stored_password_hash() -> str:
+    return (db.get_config_row()["admin_password_hash"] or "").strip()
+
+
+def has_password() -> bool:
+    return bool(_stored_password_hash())
+
+
+def set_password(new_password: str) -> None:
+    pw = (new_password or "").encode("utf-8")
+    if len(pw) < MIN_PASSWORD_LEN:
+        raise ValueError(f"password must be at least {MIN_PASSWORD_LEN} characters")
+    if len(pw) > 128:
+        raise ValueError("password too long (max 128 bytes)")
+    digest = bcrypt.hashpw(pw, bcrypt.gensalt(rounds=12)).decode("ascii")
+    db.update_config({"admin_password_hash": digest})
+
+
+def clear_password() -> None:
+    db.update_config({"admin_password_hash": ""})
+
+
+def verify_password(provided: str) -> bool:
+    if not provided:
+        return False
+    stored = _stored_password_hash()
+    if not stored:
+        return False
+    try:
+        return bcrypt.checkpw(provided.encode("utf-8"), stored.encode("ascii"))
+    except (ValueError, TypeError):
+        return False
+
+
+# ── unified credential check + request helpers ────────────────────────────────
+
+def verify_credential(provided: str) -> bool:
+    """True if `provided` matches the recovery token or the configured password."""
+    return verify_token(provided) or verify_password(provided)
 
 
 def extract_token(request: Request) -> str:
+    """Pull the credential from cookie / query / header. Cookies always carry the token."""
     return (
         request.cookies.get(TOKEN_COOKIE)
         or request.query_params.get("token")
@@ -93,7 +155,11 @@ def extract_token(request: Request) -> str:
 
 
 async def require_auth(request: Request) -> None:
-    if not verify(extract_token(request)):
+    """
+    Cheap per-request check: cookie/header/qs MUST carry the recovery token.
+    Password is only accepted at /api/auth/login, where we re-issue a token cookie.
+    """
+    if not verify_token(extract_token(request)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                             detail="auth required")
 
@@ -102,12 +168,8 @@ def cookie_kwargs() -> dict:
     return dict(
         key=TOKEN_COOKIE,
         httponly=True,
-        # Lax (not Strict) so the cookie survives the first cross-site
-        # top-level navigation that brings the user here from a terminal
-        # link, email, etc. CSRF is still defended via the Origin/Host
-        # checks in main.py and Lax already blocks cross-site POSTs.
         samesite="lax",
-        secure=False,  # localhost http; flip to True if you reverse-proxy via TLS
+        secure=False,
         max_age=COOKIE_MAX_AGE,
         path="/",
     )

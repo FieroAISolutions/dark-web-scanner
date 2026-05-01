@@ -262,7 +262,12 @@ class ScanReq(BaseModel):
 
 
 class LoginReq(BaseModel):
-    token: str
+    token: str  # accepts either the recovery token or the configured password
+
+
+class SetPasswordReq(BaseModel):
+    password: Optional[str] = None  # new password (required for set-password)
+    current: Optional[str] = None   # required when changing or clearing an existing password
 
 
 # ── routes: index + static ────────────────────────────────────────────────────
@@ -270,12 +275,13 @@ class LoginReq(BaseModel):
 @app.get("/")
 async def index(request: Request):
     """
-    Serves the SPA. If a `?token=` query param is supplied and valid, sets the
-    auth cookie and redirects to a clean URL so the token doesn't sit in
-    browser history.
+    Serves the SPA. If a `?token=` query param is supplied and matches the
+    recovery token, sets the auth cookie and redirects to a clean URL so the
+    token doesn't sit in browser history. (Passwords are only accepted via
+    POST /api/auth/login.)
     """
     qs_token = request.query_params.get("token")
-    if qs_token and auth.verify(qs_token):
+    if qs_token and auth.verify_token(qs_token):
         resp = RedirectResponse(url="/", status_code=303)
         resp.set_cookie(value=qs_token, **auth.cookie_kwargs())
         return resp
@@ -289,15 +295,37 @@ app.mount("/static", StaticFiles(directory=FRONTEND / "static"), name="static")
 
 @app.get("/api/auth/status")
 async def auth_status(request: Request):
-    return {"authenticated": auth.verify(auth.extract_token(request))}
+    return {
+        "authenticated": auth.verify_token(auth.extract_token(request)),
+        "password_set": auth.has_password(),
+    }
 
 
 @app.post("/api/auth/login")
 async def auth_login(payload: LoginReq, response: Response):
-    if not auth.verify(payload.token or ""):
-        raise HTTPException(status_code=401, detail="invalid token")
-    response.set_cookie(value=payload.token, **auth.cookie_kwargs())
-    return {"ok": True}
+    """
+    Accept either the recovery token or the configured password. On success,
+    the cookie is set to the recovery token in either case so subsequent
+    per-request checks remain a single SHA-256 compare (no bcrypt per request).
+    """
+    cred = (payload.token or "").strip()
+    if not cred:
+        raise HTTPException(status_code=401, detail="missing credential")
+
+    if auth.verify_token(cred):
+        response.set_cookie(value=cred, **auth.cookie_kwargs())
+        return {"ok": True, "method": "token", "password_set": auth.has_password()}
+
+    if auth.verify_password(cred):
+        recovery = auth.read_recovery_token()
+        if not recovery:
+            log.warning("password login succeeded but recovery token is missing on disk; "
+                        "regenerating so the cookie can be set")
+            recovery = auth.regenerate_token()
+        response.set_cookie(value=recovery, **auth.cookie_kwargs())
+        return {"ok": True, "method": "password", "password_set": True}
+
+    raise HTTPException(status_code=401, detail="invalid credential")
 
 
 @app.post("/api/auth/logout")
@@ -311,6 +339,30 @@ async def auth_regenerate(response: Response):
     new_token = auth.regenerate_token()
     response.set_cookie(value=new_token, **auth.cookie_kwargs())
     return {"ok": True, "token": new_token, "saved_to": str(auth.TOKEN_FILE)}
+
+
+@app.post("/api/auth/set-password", dependencies=[Depends(auth.require_auth)])
+async def auth_set_password(payload: SetPasswordReq):
+    if not payload.password:
+        raise HTTPException(status_code=400, detail="password is required")
+    # If a password already exists, the caller must prove they know it.
+    if auth.has_password():
+        if not payload.current or not auth.verify_password(payload.current):
+            raise HTTPException(status_code=403, detail="current password required")
+    try:
+        auth.set_password(payload.password)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "password_set": True}
+
+
+@app.post("/api/auth/clear-password", dependencies=[Depends(auth.require_auth)])
+async def auth_clear_password(payload: SetPasswordReq):
+    if auth.has_password():
+        if not payload.current or not auth.verify_password(payload.current):
+            raise HTTPException(status_code=403, detail="current password required")
+    auth.clear_password()
+    return {"ok": True, "password_set": False}
 
 
 # ── routes: protected API ─────────────────────────────────────────────────────
@@ -469,7 +521,7 @@ async def ws_endpoint(ws: WebSocket):
     token = (ws.cookies.get(auth.TOKEN_COOKIE)
              or ws.query_params.get("token")
              or "")
-    if not auth.verify(token):
+    if not auth.verify_token(token):
         await ws.close(code=1008)
         return
     await ws.accept()
