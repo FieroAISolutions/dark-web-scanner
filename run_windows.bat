@@ -21,8 +21,8 @@ if not exist "%BACKEND%\.venv" (
 )
 
 call "%BACKEND%\.venv\Scripts\activate.bat"
-pip install -q --upgrade pip
-pip install -q -r "%BACKEND%\requirements.txt"
+python -m pip install -q --upgrade pip
+python -m pip install -q -r "%BACKEND%\requirements.txt"
 
 set PORT=%1
 if "%PORT%"=="" set PORT=7070

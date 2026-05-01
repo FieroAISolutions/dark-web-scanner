@@ -17,8 +17,8 @@ fi
 
 # shellcheck disable=SC1091
 source "$BACKEND/.venv/bin/activate"
-pip install -q --upgrade pip
-pip install -q -r "$BACKEND/requirements.txt"
+python3 -m pip install -q --upgrade pip
+python3 -m pip install -q -r "$BACKEND/requirements.txt"
 
 PORT="${1:-7070}"
 echo
