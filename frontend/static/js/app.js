@@ -635,6 +635,16 @@ async function login() {
       const j = await r.json().catch(() => ({}));
       throw new Error(j.detail || 'invalid token');
     }
+    // Verify the cookie actually stuck before booting the app — a 200 here
+    // only means the token is valid, not that the browser stored the cookie.
+    const probe = await fetch('/api/auth/status', { credentials: 'same-origin' });
+    const pd = await probe.json().catch(() => ({}));
+    if (!pd.authenticated) {
+      throw new Error(
+        'Token accepted, but the session cookie did not persist. ' +
+        'Check browser cookie / privacy settings for localhost and retry.'
+      );
+    }
     $('login-token').value = '';
     _setStatus('login-status', '', '');
     hideLogin();

@@ -102,7 +102,11 @@ def cookie_kwargs() -> dict:
     return dict(
         key=TOKEN_COOKIE,
         httponly=True,
-        samesite="strict",
+        # Lax (not Strict) so the cookie survives the first cross-site
+        # top-level navigation that brings the user here from a terminal
+        # link, email, etc. CSRF is still defended via the Origin/Host
+        # checks in main.py and Lax already blocks cross-site POSTs.
+        samesite="lax",
         secure=False,  # localhost http; flip to True if you reverse-proxy via TLS
         max_age=COOKIE_MAX_AGE,
         path="/",
