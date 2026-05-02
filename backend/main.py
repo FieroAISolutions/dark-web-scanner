@@ -29,6 +29,10 @@ log = logging.getLogger("dws.main")
 ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "frontend"
 
+# Per-process build stamp; substituted into index.html so cached JS/CSS from
+# previous server runs gets invalidated automatically on restart.
+BUILD_STAMP = os.environ.get("DWS_BUILD_STAMP") or str(int(time.time()))
+
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 # Hosts that map to this loopback service. Anything else is rejected to defend
@@ -308,6 +312,17 @@ class SetPasswordReq(BaseModel):
 
 # ── routes: index + static ────────────────────────────────────────────────────
 
+_index_template: Optional[str] = None
+
+
+def _render_index() -> str:
+    """Read index.html and substitute the build stamp (read once, cached)."""
+    global _index_template
+    if _index_template is None:
+        _index_template = (FRONTEND / "index.html").read_text(encoding="utf-8")
+    return _index_template.replace("__BUILD__", BUILD_STAMP)
+
+
 @app.get("/")
 async def index(request: Request):
     """
@@ -321,10 +336,24 @@ async def index(request: Request):
         resp = RedirectResponse(url="/", status_code=303)
         resp.set_cookie(value=qs_token, **auth.cookie_kwargs())
         return resp
-    return FileResponse(FRONTEND / "index.html")
+    return Response(
+        content=_render_index(),
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
-app.mount("/static", StaticFiles(directory=FRONTEND / "static"), name="static")
+class _NoCacheStaticFiles(StaticFiles):
+    """StaticFiles that forces revalidation, so updated JS/CSS land immediately
+    after a server restart instead of being served from browser disk cache."""
+
+    async def get_response(self, path: str, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return resp
+
+
+app.mount("/static", _NoCacheStaticFiles(directory=FRONTEND / "static"), name="static")
 
 
 # ── routes: auth ──────────────────────────────────────────────────────────────

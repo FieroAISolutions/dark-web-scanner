@@ -1,3 +1,8 @@
+// Build stamp logged so we can confirm which version is actually running in
+// the browser when diagnosing cache issues. Bump the literal string here and
+// in the related backend constants whenever the auth/WS contract changes.
+console.log('[DarkWebScanner] SPA build: ws-ticket-auth v1');
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 const $ = (id) => document.getElementById(id);
