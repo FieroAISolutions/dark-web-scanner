@@ -2,7 +2,9 @@ import asyncio
 import logging
 import os
 import re
+import secrets as py_secrets
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -69,6 +71,40 @@ class Hub:
 
 
 hub = Hub()
+
+
+# ── one-shot WebSocket tickets ────────────────────────────────────────────────
+#
+# Browsers don't always attach cookies to the WebSocket upgrade request — some
+# privacy-focused builds and many extensions strip them, even on same-origin.
+# To keep WS auth deterministic, the SPA fetches a single-use ticket via an
+# authenticated HTTP POST, then opens the WS with ?ticket=… . The cookie path
+# still works when the browser cooperates.
+
+_WS_TICKET_TTL = 60.0  # seconds
+_ws_tickets: dict[str, float] = {}
+_ws_tickets_lock = asyncio.Lock()
+
+
+async def _issue_ws_ticket() -> str:
+    ticket = py_secrets.token_urlsafe(32)
+    async with _ws_tickets_lock:
+        now = time.time()
+        # Drop expired tickets opportunistically.
+        for k in [k for k, exp in _ws_tickets.items() if exp <= now]:
+            del _ws_tickets[k]
+        _ws_tickets[ticket] = now + _WS_TICKET_TTL
+    return ticket
+
+
+async def _consume_ws_ticket(ticket: str) -> bool:
+    if not ticket:
+        return False
+    async with _ws_tickets_lock:
+        exp = _ws_tickets.pop(ticket, None)
+    if exp is None:
+        return False
+    return exp > time.time()
 
 
 # ── scan orchestration ───────────────────────────────────────────────────────
@@ -343,6 +379,13 @@ async def auth_regenerate(response: Response):
     return {"ok": True, "token": new_token, "saved_to": str(auth.TOKEN_FILE)}
 
 
+@app.post("/api/auth/ws-ticket", dependencies=[Depends(auth.require_auth)])
+async def auth_ws_ticket():
+    """Issue a single-use, 60-second ticket the SPA can pass via ?ticket= when
+    opening a WebSocket — bypasses browser quirks around cookies on WS upgrade."""
+    return {"ticket": await _issue_ws_ticket(), "ttl_seconds": int(_WS_TICKET_TTL)}
+
+
 @app.post("/api/auth/set-password", dependencies=[Depends(auth.require_auth)])
 async def auth_set_password(payload: SetPasswordReq):
     log.info("set-password: request received")
@@ -525,13 +568,28 @@ async def api_test_webhook():
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
-    # Authenticate the WS connection from the cookie or query param BEFORE accepting.
-    token = (ws.cookies.get(auth.TOKEN_COOKIE)
-             or ws.query_params.get("token")
-             or "")
-    if not auth.verify_token(token):
+    # Auth precedence:
+    #   1. ?ticket=… one-shot ticket (preferred — survives browser quirks
+    #      where cookies aren't attached to WS upgrade requests).
+    #   2. dws_token cookie.
+    #   3. ?token=… recovery token (manual / debugging).
+    cookie_token = ws.cookies.get(auth.TOKEN_COOKIE) or ""
+    qs_ticket = ws.query_params.get("ticket") or ""
+    qs_token = ws.query_params.get("token") or ""
+
+    authed = False
+    if qs_ticket and await _consume_ws_ticket(qs_ticket):
+        authed = True
+    elif cookie_token and auth.verify_token(cookie_token):
+        authed = True
+    elif qs_token and auth.verify_token(qs_token):
+        authed = True
+
+    if not authed:
+        log.info("ws: rejected (no valid ticket/cookie/token)")
         await ws.close(code=1008)
         return
+
     await ws.accept()
     await hub.add(ws)
     try:

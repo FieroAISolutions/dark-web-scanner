@@ -125,15 +125,35 @@ function switchTab(name) {
 let _ws = null;
 let _activeReportRunId = null;
 
-function connectWebSocket() {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const url = `${proto}://${location.host}/ws`;
-  _ws = new WebSocket(url);
+async function _fetchWsTicket() {
+  // Many browsers / privacy modes don't attach cookies to the WS upgrade
+  // handshake. We fetch a single-use ticket via authed HTTP and pass it in
+  // the WS URL so auth doesn't rely on cookie behaviour at upgrade time.
+  try {
+    const r = await fetch('/api/auth/ws-ticket', {
+      method: 'POST',
+      credentials: 'same-origin',
+    });
+    if (r.ok) {
+      const d = await r.json();
+      return d.ticket || '';
+    }
+  } catch {}
+  return '';
+}
+
+async function connectWebSocket() {
   const status = $('ws-status');
+  const ticket = await _fetchWsTicket();
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const qs = ticket ? `?ticket=${encodeURIComponent(ticket)}` : '';
+  const url = `${proto}://${location.host}/ws${qs}`;
+  _ws = new WebSocket(url);
 
   _ws.addEventListener('open',  () => { status.classList.remove('bad'); status.classList.add('ok'); });
   _ws.addEventListener('close', () => {
     status.classList.remove('ok'); status.classList.add('bad');
+    // Each reconnect needs its own fresh ticket — they're single-use.
     setTimeout(connectWebSocket, 3000);
   });
   _ws.addEventListener('error', () => { status.classList.remove('ok'); status.classList.add('bad'); });
