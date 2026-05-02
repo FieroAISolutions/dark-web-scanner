@@ -112,7 +112,9 @@ def has_password() -> bool:
 
 
 def set_password(new_password: str) -> None:
-    pw = (new_password or "").encode("utf-8")
+    # Strip surrounding whitespace so a stray space (autofill, mobile keyboard
+    # double-space) can't lock the user out of their own account.
+    pw = (new_password or "").strip().encode("utf-8")
     if len(pw) < MIN_PASSWORD_LEN:
         raise ValueError(f"password must be at least {MIN_PASSWORD_LEN} characters")
     if len(pw) > 128:
@@ -132,7 +134,8 @@ def verify_password(provided: str) -> bool:
     if not stored:
         return False
     try:
-        return bcrypt.checkpw(provided.encode("utf-8"), stored.encode("ascii"))
+        return bcrypt.checkpw((provided or "").strip().encode("utf-8"),
+                              stored.encode("ascii"))
     except (ValueError, TypeError):
         return False
 

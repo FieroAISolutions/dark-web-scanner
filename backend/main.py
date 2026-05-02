@@ -374,12 +374,15 @@ async def auth_login(payload: LoginReq, response: Response):
     per-request checks remain a single SHA-256 compare (no bcrypt per request).
     """
     cred = (payload.token or "").strip()
+    has_pw = auth.has_password()
+    log.info("login attempt: cred_len=%d password_set=%s", len(cred), has_pw)
     if not cred:
         raise HTTPException(status_code=401, detail="missing credential")
 
     if auth.verify_token(cred):
+        log.info("login success via recovery token")
         response.set_cookie(value=cred, **auth.cookie_kwargs())
-        return {"ok": True, "method": "token", "password_set": auth.has_password()}
+        return {"ok": True, "method": "token", "password_set": has_pw}
 
     # Password verification calls bcrypt — run off the event loop so we don't
     # stall other concurrent requests (WebSocket pings, dashboard fetches).
@@ -389,9 +392,11 @@ async def auth_login(payload: LoginReq, response: Response):
             log.warning("password login succeeded but recovery token is missing on disk; "
                         "regenerating so the cookie can be set")
             recovery = auth.regenerate_token()
+        log.info("login success via password")
         response.set_cookie(value=recovery, **auth.cookie_kwargs())
         return {"ok": True, "method": "password", "password_set": True}
 
+    log.info("login failed: neither token nor password matched (password_set=%s)", has_pw)
     raise HTTPException(status_code=401, detail="invalid credential")
 
 

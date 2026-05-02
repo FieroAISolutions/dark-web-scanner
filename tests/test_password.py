@@ -132,3 +132,28 @@ def test_password_endpoints_require_auth(anon_client):
     assert r.status_code == 401
     r = anon_client.post("/api/auth/clear-password", json={})
     assert r.status_code == 401
+
+
+# ── Whitespace tolerance — both ends strip surrounding whitespace ─────────────
+
+def test_password_stripped_on_set_and_verify():
+    """Saving with trailing whitespace and logging in without (or vice versa)
+    should still match — prevents hard-to-debug autofill / mobile-keyboard
+    lockouts."""
+    auth.set_password("  daily-pw-12  ")
+    assert auth.verify_password("daily-pw-12") is True
+    assert auth.verify_password("  daily-pw-12  ") is True
+    assert auth.verify_password("daily-pw-12 ") is True
+    assert auth.verify_password(" daily-pw-12") is True
+
+
+def test_login_with_password_tolerates_whitespace(anon_client, admin_token):
+    anon_client.post(
+        "/api/auth/set-password",
+        json={"password": "trim-me-pw-12  "},  # saved with trailing space
+        headers={"X-Auth-Token": admin_token},
+    )
+    # Login without the trailing space — must still succeed
+    r = anon_client.post("/api/auth/login", json={"token": "trim-me-pw-12"})
+    assert r.status_code == 200
+    assert r.json()["method"] == "password"

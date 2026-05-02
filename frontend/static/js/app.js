@@ -109,6 +109,18 @@ function initNav() {
   $('login-token')?.addEventListener('keydown', e => {
     if (e.key === 'Enter') login();
   });
+  // Show/hide password toggles for the login + set-password modals.
+  _wireShowToggle('login-show', 'login-token');
+  _wireShowToggle('setpw-show', 'setpw-new');
+}
+
+function _wireShowToggle(checkboxId, ...inputIds) {
+  const cb = $(checkboxId);
+  if (!cb) return;
+  cb.addEventListener('change', () => {
+    const t = cb.checked ? 'text' : 'password';
+    inputIds.forEach(id => { const el = $(id); if (el) el.type = t; });
+  });
 }
 
 function switchTab(name) {
@@ -742,14 +754,14 @@ function showSetPasswordModal() {
 }
 
 async function savePasswordModal() {
-  const pw = $('setpw-new').value;
-  const conf = $('setpw-confirm').value;
+  const pw = ($('setpw-new').value || '').trim();
+  const conf = ($('setpw-confirm').value || '').trim();
   if (pw.length < 8) {
     _setStatus('setpw-status', 'Password must be at least 8 characters.', '#f85149');
     return;
   }
   if (pw !== conf) {
-    _setStatus('setpw-status', 'Passwords do not match.', '#f85149');
+    _setStatus('setpw-status', 'Passwords do not match (whitespace ignored).', '#f85149');
     return;
   }
   try {
@@ -780,15 +792,15 @@ async function refreshAuthState() {
 }
 
 async function savePassword() {
-  const cur = $('cfg-pw-current').value;
-  const pw = $('cfg-pw-new').value;
-  const conf = $('cfg-pw-confirm').value;
+  const cur = ($('cfg-pw-current').value || '').trim();
+  const pw = ($('cfg-pw-new').value || '').trim();
+  const conf = ($('cfg-pw-confirm').value || '').trim();
   if (pw.length < 8) {
     _setStatus('cfg-pw-status', 'Password must be at least 8 characters.', '#f85149');
     return;
   }
   if (pw !== conf) {
-    _setStatus('cfg-pw-status', 'Passwords do not match.', '#f85149');
+    _setStatus('cfg-pw-status', 'Passwords do not match (whitespace ignored).', '#f85149');
     return;
   }
   try {
