@@ -16,7 +16,26 @@ function _parseEmails(raw) {
 }
 
 async function _apiFetch(url, opts = {}) {
-  const r = await fetch(url, { credentials: 'same-origin', ...opts });
+  // 30s safety timeout so a hung server can't leave the UI stuck on "Saving…".
+  const timeoutMs = opts.timeoutMs ?? 30000;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  let r;
+  try {
+    r = await fetch(url, {
+      credentials: 'same-origin',
+      ...opts,
+      signal: opts.signal ?? ac.signal,
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    if (e?.name === 'AbortError') {
+      throw new Error(`request timed out after ${timeoutMs / 1000}s`);
+    }
+    throw e;
+  }
+  clearTimeout(timer);
+
   if (r.status === 401) {
     showLogin();
     throw new Error('not authenticated');

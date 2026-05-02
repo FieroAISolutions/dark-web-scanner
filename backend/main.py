@@ -316,7 +316,9 @@ async def auth_login(payload: LoginReq, response: Response):
         response.set_cookie(value=cred, **auth.cookie_kwargs())
         return {"ok": True, "method": "token", "password_set": auth.has_password()}
 
-    if auth.verify_password(cred):
+    # Password verification calls bcrypt — run off the event loop so we don't
+    # stall other concurrent requests (WebSocket pings, dashboard fetches).
+    if await asyncio.to_thread(auth.verify_password, cred):
         recovery = auth.read_recovery_token()
         if not recovery:
             log.warning("password login succeeded but recovery token is missing on disk; "
@@ -343,23 +345,29 @@ async def auth_regenerate(response: Response):
 
 @app.post("/api/auth/set-password", dependencies=[Depends(auth.require_auth)])
 async def auth_set_password(payload: SetPasswordReq):
+    log.info("set-password: request received")
     if not payload.password:
         raise HTTPException(status_code=400, detail="password is required")
     # If a password already exists, the caller must prove they know it.
     if auth.has_password():
-        if not payload.current or not auth.verify_password(payload.current):
+        if not payload.current:
+            raise HTTPException(status_code=403, detail="current password required")
+        if not await asyncio.to_thread(auth.verify_password, payload.current):
             raise HTTPException(status_code=403, detail="current password required")
     try:
-        auth.set_password(payload.password)
+        await asyncio.to_thread(auth.set_password, payload.password)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    log.info("set-password: success")
     return {"ok": True, "password_set": True}
 
 
 @app.post("/api/auth/clear-password", dependencies=[Depends(auth.require_auth)])
 async def auth_clear_password(payload: SetPasswordReq):
     if auth.has_password():
-        if not payload.current or not auth.verify_password(payload.current):
+        if not payload.current:
+            raise HTTPException(status_code=403, detail="current password required")
+        if not await asyncio.to_thread(auth.verify_password, payload.current):
             raise HTTPException(status_code=403, detail="current password required")
     auth.clear_password()
     return {"ok": True, "password_set": False}
