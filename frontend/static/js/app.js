@@ -99,6 +99,8 @@ function initNav() {
     if (id === 'cfg-test-email-btn')     btn.addEventListener('click', testEmail);
     if (id === 'cfg-test-webhook-btn')   btn.addEventListener('click', testWebhook);
     if (id === 'cfg-regen-btn')          btn.addEventListener('click', regenerateToken);
+    if (id === 'upd-check-btn')          btn.addEventListener('click', checkForUpdates);
+    if (id === 'upd-apply-btn')          btn.addEventListener('click', applyUpdate);
     if (id === 'cfg-pw-save-btn')        btn.addEventListener('click', savePassword);
     if (id === 'cfg-pw-clear-btn')       btn.addEventListener('click', clearPassword);
     if (id === 'login-btn')              btn.addEventListener('click', login);
@@ -134,7 +136,7 @@ function switchTab(name) {
   if (name === 'monitor')   loadEmails();
   if (name === 'findings')  loadFindings('findings');
   if (name === 'pastes')    loadPastes();
-  if (name === 'config')    { loadConfig(); refreshAuthState(); }
+  if (name === 'config')    { loadConfig(); refreshAuthState(); checkForUpdates(); }
 }
 
 // ── WebSocket ──────────────────────────────────────────────────────────────────
@@ -816,6 +818,71 @@ async function savePassword() {
     setTimeout(() => _setStatus('cfg-pw-status', '', ''), 4000);
   } catch (e) {
     _setStatus('cfg-pw-status', 'Error: ' + e.message, '#f85149');
+  }
+}
+
+// ── Updates ───────────────────────────────────────────────────────────────────
+
+function _renderUpdateState(d) {
+  const stateEl = $('upd-state');
+  const applyBtn = $('upd-apply-btn');
+  if (!d.is_repo) {
+    stateEl.textContent = `Updater unavailable: ${d.error || 'not a git checkout'}.`;
+    applyBtn.disabled = true;
+    return;
+  }
+  const parts = [`Branch <b>${_esc(d.branch)}</b> @ <code>${_esc(d.head_sha)}</code>`];
+  if (d.head_subject) parts.push(`<span class="muted">${_esc(d.head_subject)}</span>`);
+  if (d.behind > 0) {
+    parts.push(`<b>${d.behind}</b> commit${d.behind > 1 ? 's' : ''} behind <code>origin/${_esc(d.branch)}</code>`);
+  } else if (d.upstream_sha) {
+    parts.push(`<span style="color:#3fb950">up to date</span>`);
+  } else {
+    parts.push(`<span class="muted">no upstream tracking branch</span>`);
+  }
+  if (d.dirty) parts.push(`<span style="color:#d29922">local uncommitted changes</span>`);
+  if (!d.fetched && d.fetch_error) {
+    parts.push(`<span style="color:#f85149">fetch failed: ${_esc(d.fetch_error)}</span>`);
+  }
+  stateEl.innerHTML = parts.join(' · ');
+  applyBtn.disabled = !d.update_available;
+}
+
+async function checkForUpdates() {
+  const stateEl = $('upd-state');
+  if (!stateEl) return;
+  try {
+    _setStatus('upd-msg', 'Checking…', '');
+    const r = await _apiFetch('/api/update/status', { timeoutMs: 60000 });
+    const d = await r.json();
+    _renderUpdateState(d);
+    _setStatus('upd-msg', '', '');
+  } catch (e) {
+    _setStatus('upd-msg', 'Error: ' + e.message, '#f85149');
+  }
+}
+
+async function applyUpdate() {
+  if (!confirm('Pull the latest commit from origin? You will need to stop ' +
+               'and restart the launcher afterwards to load the new code.')) return;
+  try {
+    _setStatus('upd-msg', 'Applying update…', '');
+    $('upd-apply-btn').disabled = true;
+    const r = await _apiFetch('/api/update/apply', { method: 'POST', timeoutMs: 120000 });
+    const d = await r.json();
+    if (!d.ok) {
+      _setStatus('upd-msg', 'Failed: ' + d.error, '#f85149');
+      return;
+    }
+    let msg = `Updated ${d.before_sha} → ${d.after_sha}.`;
+    if (d.summary && d.summary.length) {
+      msg += ` ${d.summary.length} commit${d.summary.length > 1 ? 's' : ''} pulled.`;
+    }
+    msg += ' Stop and restart the launcher to load the new code.';
+    _setStatus('upd-msg', msg, '#3fb950');
+    checkForUpdates();
+  } catch (e) {
+    _setStatus('upd-msg', 'Error: ' + e.message, '#f85149');
   }
 }
 

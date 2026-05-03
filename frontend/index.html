@@ -265,6 +265,22 @@
       </div>
 
       <div class="card">
+        <h3>Updates</h3>
+        <p class="muted small">
+          Pull the latest commit from <code>origin</code>. After applying an
+          update, restart the launcher (<code>run_*.sh</code> / <code>.bat</code>)
+          to reload the new code; the launcher reinstalls dependencies on every
+          run, so no manual <code>pip install</code> is needed.
+        </p>
+        <div id="upd-state" class="muted small">—</div>
+        <div class="actions">
+          <button id="upd-check-btn">Check for updates</button>
+          <button id="upd-apply-btn" class="primary" disabled>Apply update</button>
+          <span id="upd-msg" class="status"></span>
+        </div>
+      </div>
+
+      <div class="card">
         <h3>Recovery token</h3>
         <p class="muted small">
           Regenerating issues a new recovery token, invalidates every signed-in

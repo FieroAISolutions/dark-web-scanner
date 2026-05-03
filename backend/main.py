@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import (alerts, auth, config as config_mod, db, log_redact,
-               scanner, scheduler as sched_mod)
+               scanner, scheduler as sched_mod, updater)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -581,6 +581,19 @@ async def api_test_email():
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ── routes: updater ───────────────────────────────────────────────────────────
+
+
+@app.get("/api/update/status", dependencies=protected)
+async def api_update_status():
+    return await updater.status()
+
+
+@app.post("/api/update/apply", dependencies=protected)
+async def api_update_apply():
+    return await updater.apply_update()
 
 
 @app.post("/api/config/test-webhook", dependencies=protected)
