@@ -58,6 +58,7 @@
       <button class="tab" data-tab="findings">Findings</button>
       <button class="tab" data-tab="pastes">Pastes</button>
       <button class="tab" data-tab="report">One-shot report</button>
+      <button class="tab" data-tab="reports">Reports</button>
       <button class="tab" data-tab="config">Config</button>
     </nav>
     <label class="group-filter muted small" title="Filter dashboard, findings, and pastes by group">
@@ -208,6 +209,32 @@
       <div class="card" id="report-results-panel" style="display:none">
         <h3>Results</h3>
         <div id="report-results"></div>
+      </div>
+    </section>
+
+    <!-- Reports ────────────────────────────────────────────────────────────── -->
+    <section class="view" id="view-reports" hidden>
+      <div class="card">
+        <h3>Generate report</h3>
+        <p class="muted small">
+          Renders a printable HTML report scoped to a group and a date range.
+          Use your browser's "Save as PDF" to produce a deliverable file —
+          headers, severity counts, findings grouped by severity, paste
+          mentions, monitored addresses, and scan runs are all included.
+        </p>
+        <div class="form-grid">
+          <label>Group<br>
+            <select id="report-group"></select>
+          </label>
+          <label>Since (date or blank for last 30 days)<br>
+            <input type="date" id="report-since">
+          </label>
+        </div>
+        <div class="actions">
+          <button id="report-open-btn" class="primary">Open report in new tab</button>
+          <button id="report-download-btn">Download as HTML</button>
+          <span id="report-status" class="status"></span>
+        </div>
       </div>
     </section>
 

@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import (alerts, auth, config as config_mod, db, log_redact,
+from . import (alerts, auth, config as config_mod, db, log_redact, reports,
                scanner, scheduler as sched_mod, updater)
 
 logging.basicConfig(
@@ -664,6 +664,29 @@ async def api_test_email():
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ── routes: reports ───────────────────────────────────────────────────────────
+
+
+@app.get("/api/report", dependencies=protected)
+async def api_report(group_id: Optional[int] = None, since: Optional[str] = None,
+                     days: Optional[int] = None):
+    """Render an HTML report scoped to a group + date range. Falls back to
+    `days=N` (defaults to 30) when no since-date is given."""
+    if group_id is not None and db.get_group(group_id) is None:
+        raise HTTPException(status_code=400, detail="unknown group_id")
+    try:
+        since_norm = reports.parse_since(since) if since else reports.default_since(days or 30)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    data = reports.gather_report_data(group_id=group_id, since=since_norm)
+    body = reports.render(data)
+    return Response(
+        content=body,
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # ── routes: updater ───────────────────────────────────────────────────────────

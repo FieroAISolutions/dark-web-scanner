@@ -124,6 +124,8 @@ function initNav() {
     if (id === 'upd-check-btn')          btn.addEventListener('click', checkForUpdates);
     if (id === 'upd-apply-btn')          btn.addEventListener('click', applyUpdate);
     if (id === 'group-create-btn')       btn.addEventListener('click', createGroup);
+    if (id === 'report-open-btn')        btn.addEventListener('click', () => openReport(false));
+    if (id === 'report-download-btn')    btn.addEventListener('click', () => openReport(true));
     if (id === 'cfg-pw-save-btn')        btn.addEventListener('click', savePassword);
     if (id === 'cfg-pw-clear-btn')       btn.addEventListener('click', clearPassword);
     if (id === 'login-btn')              btn.addEventListener('click', login);
@@ -168,6 +170,7 @@ function refreshActiveTab() {
   if (name === 'dashboard') loadDashboard();
   if (name === 'monitor')   loadEmails();
   if (name === 'groups')    loadGroups();
+  if (name === 'reports')   loadReportsTab();
   if (name === 'findings')  loadFindings('findings');
   if (name === 'pastes')    loadPastes();
   if (name === 'config')    { loadConfig(); refreshAuthState(); checkForUpdates(); }
@@ -1018,6 +1021,67 @@ async function deleteGroupRow(group_id) {
     loadGroups();
   } catch (e) {
     alert('Error: ' + e.message);
+  }
+}
+
+// ── Reports ───────────────────────────────────────────────────────────────────
+
+async function loadReportsTab() {
+  await refreshGroupsCache();
+  const sel = $('report-group');
+  if (!sel) return;
+  const previous = sel.value;
+  sel.innerHTML = '<option value="">All groups</option>'
+    + _allGroups.map(g => `<option value="${g.id}">${_esc(g.name)}</option>`).join('');
+  if (previous && _allGroups.some(g => String(g.id) === previous)) {
+    sel.value = previous;
+  } else if (_activeGroupId != null) {
+    sel.value = String(_activeGroupId);
+  }
+}
+
+function _reportUrl() {
+  const params = new URLSearchParams();
+  const gid = $('report-group')?.value;
+  if (gid) params.set('group_id', gid);
+  const since = $('report-since')?.value;
+  if (since) params.set('since', since);
+  const s = params.toString();
+  return '/api/report' + (s ? `?${s}` : '');
+}
+
+async function openReport(download) {
+  _setStatus('report-status', 'Building…', '');
+  const url = _reportUrl();
+  try {
+    const r = await _apiFetch(url, { timeoutMs: 60000 });
+    const html = await r.text();
+    if (download) {
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+      const objUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objUrl;
+      const stamp = new Date().toISOString().slice(0, 10);
+      const gname = ($('report-group')?.options[$('report-group').selectedIndex]?.text || 'all')
+        .replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+      a.download = `darkwebscanner-${gname}-${stamp}.html`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(objUrl), 5000);
+      _setStatus('report-status', 'Downloaded.', '#3fb950');
+    } else {
+      const w = window.open('', '_blank');
+      if (!w) {
+        _setStatus('report-status', 'Pop-up blocked — use Download instead.', '#f85149');
+        return;
+      }
+      w.document.open();
+      w.document.write(html);
+      w.document.close();
+      _setStatus('report-status', 'Opened.', '#3fb950');
+    }
+    setTimeout(() => _setStatus('report-status', '', ''), 4000);
+  } catch (e) {
+    _setStatus('report-status', 'Error: ' + e.message, '#f85149');
   }
 }
 
