@@ -1,6 +1,10 @@
-"""Tests for the in-app updater. We mock the subprocess git calls so the
-suite runs in any environment, including ones without a real git repo."""
+"""Tests for the in-app updater. We mock the subprocess git calls and the
+GitHub HTTP layer so the suite runs in any environment, including ones
+without a real git repo or network access."""
 
+import gzip
+import io
+import tarfile
 from unittest.mock import patch
 
 import pytest
@@ -21,21 +25,7 @@ def _fake_git(responses):
     return side_effect
 
 
-@pytest.mark.asyncio
-async def test_status_when_not_a_repo(monkeypatch):
-    monkeypatch.setattr(updater, "_git_available", lambda: True)
-    monkeypatch.setattr(updater, "_is_repo_sync", lambda: False)
-    out = await updater.status()
-    assert out == {"is_repo": False, "error": "not a git checkout"}
-
-
-@pytest.mark.asyncio
-async def test_status_no_git_installed(monkeypatch):
-    monkeypatch.setattr(updater, "_git_available", lambda: False)
-    out = await updater.status()
-    assert out["is_repo"] is False
-    assert "git is not installed" in out["error"]
-
+# ── git mode ─────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_status_up_to_date(monkeypatch):
@@ -58,6 +48,8 @@ async def test_status_up_to_date(monkeypatch):
         out = await updater.status()
 
     assert out["is_repo"] is True
+    assert out["available"] is True
+    assert out["mode"] == "git"
     assert out["branch"] == "main"
     assert out["behind"] == 0
     assert out["update_available"] is False
@@ -85,6 +77,7 @@ async def test_status_behind_origin(monkeypatch):
     with patch("backend.updater._git_sync", side_effect=side_effect):
         out = await updater.status()
 
+    assert out["mode"] == "git"
     assert out["behind"] == 3
     assert out["update_available"] is True
 
@@ -184,6 +177,204 @@ async def test_apply_fetch_failure(monkeypatch):
     assert "Could not resolve hostname" in out["error"]
 
 
+# ── tarball mode (no .git) ───────────────────────────────────────────────────
+
+async def _async_return(value):
+    return value
+
+
+def _patch_tarball_env(monkeypatch, tmp_path):
+    """Redirect ROOT and the installed-sha file into tmp_path so tarball-mode
+    apply doesn't touch the real working tree."""
+    monkeypatch.setattr(updater, "ROOT", tmp_path)
+    monkeypatch.setattr(updater, "INSTALLED_SHA_FILE",
+                        tmp_path / "data" / "installed_sha.txt")
+    monkeypatch.setattr(updater, "_is_repo_sync", lambda: False)
+
+
+@pytest.mark.asyncio
+async def test_tarball_status_first_run(monkeypatch, tmp_path):
+    """No installed SHA recorded yet → offer the apply so the SHA can be pinned."""
+    _patch_tarball_env(monkeypatch, tmp_path)
+
+    async def fake_latest(branch):
+        return {"sha": "a" * 40, "short": "aaaaaaa", "subject": "first commit"}
+    monkeypatch.setattr(updater, "_fetch_latest_commit", fake_latest)
+
+    out = await updater.status()
+    assert out["available"] is True
+    assert out["is_repo"] is False
+    assert out["mode"] == "tarball"
+    assert out["head_sha"] is None
+    assert out["upstream_sha"] == "aaaaaaa"
+    assert out["update_available"] is True
+
+
+@pytest.mark.asyncio
+async def test_tarball_status_up_to_date(monkeypatch, tmp_path):
+    _patch_tarball_env(monkeypatch, tmp_path)
+    sha = "b" * 40
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "installed_sha.txt").write_text(sha + "\n")
+
+    async def fake_latest(branch):
+        return {"sha": sha, "short": sha[:7], "subject": "current tip"}
+    monkeypatch.setattr(updater, "_fetch_latest_commit", fake_latest)
+
+    out = await updater.status()
+    assert out["mode"] == "tarball"
+    assert out["update_available"] is False
+    assert out["behind"] == 0
+    assert out["head_sha"] == sha[:7]
+
+
+@pytest.mark.asyncio
+async def test_tarball_status_update_available(monkeypatch, tmp_path):
+    _patch_tarball_env(monkeypatch, tmp_path)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "installed_sha.txt").write_text("c" * 40 + "\n")
+
+    async def fake_latest(branch):
+        return {"sha": "d" * 40, "short": "ddddddd", "subject": "newer commit"}
+    monkeypatch.setattr(updater, "_fetch_latest_commit", fake_latest)
+
+    out = await updater.status()
+    assert out["update_available"] is True
+    assert out["upstream_sha"] == "ddddddd"
+    assert out["upstream_subject"] == "newer commit"
+
+
+@pytest.mark.asyncio
+async def test_tarball_status_api_failure(monkeypatch, tmp_path):
+    _patch_tarball_env(monkeypatch, tmp_path)
+
+    async def boom(branch):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(updater, "_fetch_latest_commit", boom)
+
+    out = await updater.status()
+    assert out["available"] is True
+    assert out["fetched"] is False
+    assert "network down" in out["fetch_error"]
+    assert out["update_available"] is False
+
+
+@pytest.mark.asyncio
+async def test_tarball_apply_already_latest(monkeypatch, tmp_path):
+    _patch_tarball_env(monkeypatch, tmp_path)
+    sha = "e" * 40
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "installed_sha.txt").write_text(sha + "\n")
+
+    async def fake_latest(branch):
+        return {"sha": sha, "short": sha[:7], "subject": "x"}
+    monkeypatch.setattr(updater, "_fetch_latest_commit", fake_latest)
+
+    out = await updater.apply_update()
+    assert out["ok"] is False
+    assert "already at latest" in out["error"]
+
+
+def _make_tarball(top: str, files: dict[str, bytes]) -> bytes:
+    """Build an in-memory tar.gz mimicking GitHub's archive layout."""
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w:gz") as tf:
+        # top-level dir entry
+        info = tarfile.TarInfo(name=top)
+        info.type = tarfile.DIRTYPE
+        info.mode = 0o755
+        tf.addfile(info)
+        for rel, content in files.items():
+            data = content
+            info = tarfile.TarInfo(name=f"{top}/{rel}")
+            info.size = len(data)
+            info.mode = 0o644
+            tf.addfile(info, io.BytesIO(data))
+    return raw.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_tarball_apply_overlays_files_and_pins_sha(monkeypatch, tmp_path):
+    _patch_tarball_env(monkeypatch, tmp_path)
+    # Pre-existing operator data that must be preserved
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "scanner.db").write_bytes(b"do-not-touch")
+    (tmp_path / "data" / "admin_token.txt").write_text("secret")
+    # Pre-existing source file that the update will overwrite
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "backend" / "main.py").write_text("# old version\n")
+
+    sha = "f" * 40
+    tar = _make_tarball(
+        top=f"{updater.UPSTREAM_OWNER}-{updater.UPSTREAM_REPO}-fffffff",
+        files={
+            "backend/main.py": b"# new version\n",
+            "backend/new_module.py": b"NEW = True\n",
+            "data/should_be_skipped.txt": b"upstream tried to ship this",
+        },
+    )
+
+    async def fake_latest(branch):
+        return {"sha": sha, "short": sha[:7], "subject": "shipped new module"}
+
+    async def fake_download(s):
+        assert s == sha
+        return tar
+
+    monkeypatch.setattr(updater, "_fetch_latest_commit", fake_latest)
+    monkeypatch.setattr(updater, "_download_tarball", fake_download)
+
+    out = await updater.apply_update()
+    assert out["ok"] is True
+    assert out["after_sha"] == sha[:7]
+    assert out["restart_needed"] is True
+
+    # Source files updated
+    assert (tmp_path / "backend" / "main.py").read_text() == "# new version\n"
+    assert (tmp_path / "backend" / "new_module.py").read_text() == "NEW = True\n"
+    # Operator data untouched
+    assert (tmp_path / "data" / "scanner.db").read_bytes() == b"do-not-touch"
+    assert (tmp_path / "data" / "admin_token.txt").read_text() == "secret"
+    # Tarball entry under data/ was rejected by the preservation guard
+    assert not (tmp_path / "data" / "should_be_skipped.txt").exists()
+    # SHA pinned
+    assert (tmp_path / "data" / "installed_sha.txt").read_text().strip() == sha
+
+
+def test_is_preserved_blocks_data_and_venvs():
+    assert updater._is_preserved("data/scanner.db")
+    assert updater._is_preserved("data/admin_token.txt")
+    assert updater._is_preserved("data/installed_sha.txt")
+    assert updater._is_preserved("backend/.venv/lib/python3.11/site-packages/x.py")
+    assert updater._is_preserved(".venv/bin/activate")
+    assert updater._is_preserved(".git/HEAD")
+    assert updater._is_preserved("backend/__pycache__/main.cpython-311.pyc")
+    assert updater._is_preserved("backend/main.pyc")
+    assert updater._is_preserved("anything.db-wal")
+    assert not updater._is_preserved("backend/main.py")
+    assert not updater._is_preserved("frontend/static/js/app.js")
+    assert not updater._is_preserved("README.md")
+
+
+def test_extract_rejects_path_traversal(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater, "ROOT", tmp_path)
+    # Tarball with an entry escaping the top-level dir
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w:gz") as tf:
+        top = "evil-top"
+        info = tarfile.TarInfo(name=top)
+        info.type = tarfile.DIRTYPE
+        tf.addfile(info)
+        bad = tarfile.TarInfo(name=f"{top}/../../escaped.txt")
+        payload = b"pwned"
+        bad.size = len(payload)
+        tf.addfile(bad, io.BytesIO(payload))
+
+    updater._extract_tarball_over_root(raw.getvalue())
+    # Nothing should have been written outside tmp_path
+    assert not (tmp_path.parent / "escaped.txt").exists()
+
+
 # ── HTTP layer ────────────────────────────────────────────────────────────────
 
 def test_status_endpoint_requires_auth(anon_client):
@@ -198,8 +389,12 @@ def test_apply_endpoint_requires_auth(anon_client):
 
 def test_status_endpoint_works(client, monkeypatch):
     async def fake_status():
-        return {"is_repo": False, "error": "not a git checkout"}
+        return {"is_repo": False, "available": True, "mode": "tarball",
+                "branch": "main", "head_sha": "aaaaaaa", "upstream_sha": "bbbbbbb",
+                "update_available": True, "behind": 1, "fetched": True}
     monkeypatch.setattr(updater, "status", fake_status)
     r = client.get("/api/update/status")
     assert r.status_code == 200
-    assert r.json() == {"is_repo": False, "error": "not a git checkout"}
+    body = r.json()
+    assert body["mode"] == "tarball"
+    assert body["update_available"] is True

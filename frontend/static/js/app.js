@@ -1096,15 +1096,24 @@ async function openReport(download) {
 function _renderUpdateState(d) {
   const stateEl = $('upd-state');
   const applyBtn = $('upd-apply-btn');
-  if (!d.is_repo) {
+  if (!d.available) {
     stateEl.textContent = `Updater unavailable: ${d.error || 'not a git checkout'}.`;
     applyBtn.disabled = true;
     return;
   }
-  const parts = [`Branch <b>${_esc(d.branch)}</b> @ <code>${_esc(d.head_sha)}</code>`];
+  const isTarball = d.mode === 'tarball';
+  const headLabel = d.head_sha ? `<code>${_esc(d.head_sha)}</code>` : `<span class="muted">unknown</span>`;
+  const parts = [`Branch <b>${_esc(d.branch)}</b> @ ${headLabel}`];
+  if (isTarball) parts.push(`<span class="muted">tarball mode (no .git)</span>`);
   if (d.head_subject) parts.push(`<span class="muted">${_esc(d.head_subject)}</span>`);
   if (d.behind > 0) {
-    parts.push(`<b>${d.behind}</b> commit${d.behind > 1 ? 's' : ''} behind <code>origin/${_esc(d.branch)}</code>`);
+    if (isTarball) {
+      const upstream = d.upstream_sha ? `<code>${_esc(d.upstream_sha)}</code>` : 'origin';
+      const subj = d.upstream_subject ? ` — <span class="muted">${_esc(d.upstream_subject)}</span>` : '';
+      parts.push(`update available → ${upstream}${subj}`);
+    } else {
+      parts.push(`<b>${d.behind}</b> commit${d.behind > 1 ? 's' : ''} behind <code>origin/${_esc(d.branch)}</code>`);
+    }
   } else if (d.upstream_sha) {
     parts.push(`<span style="color:#3fb950">up to date</span>`);
   } else {

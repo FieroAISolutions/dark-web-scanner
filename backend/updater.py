@@ -1,26 +1,60 @@
 """
-In-app updater. Runs `git fetch` to compare HEAD with origin and `git pull
---ff-only` to apply, all wrapped to never block the asyncio event loop.
+In-app updater. Two modes:
+
+  * git mode — when the deployment is a git checkout, runs `git fetch` /
+    `git pull --ff-only` to compare HEAD with origin and apply.
+  * tarball mode — when no .git is present (e.g. ZIP install from GitHub),
+    queries the GitHub REST API for the upstream branch tip and overlays the
+    repo tarball onto the working tree. The currently-installed commit SHA is
+    persisted to data/installed_sha.txt so subsequent checks know whether an
+    update is available.
 
 Operator intent: a one-click 'pull latest' from the Config tab so MSP
-operators don't need terminal access to update. We deliberately do not
-restart the process from inside it — uvicorn + venv on Windows make
-process-respawn fragile. Instead we tell the operator to restart the
-launcher; the launcher already reinstalls deps from requirements.txt
-on each run, so 'apply update + restart' is fully automatic.
+operators don't need terminal access (or even git installed) to update. We
+deliberately do not restart the process from inside it — uvicorn + venv on
+Windows make process-respawn fragile. Instead we tell the operator to restart
+the launcher; the launcher already reinstalls deps from requirements.txt on
+each run, so 'apply update + restart' is fully automatic.
 """
 
 from __future__ import annotations
 
 import asyncio
+import fnmatch
+import io
 import logging
+import os
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
+
+import httpx
 
 ROOT = Path(__file__).resolve().parent.parent
 
 log = logging.getLogger("dws.updater")
+
+# Upstream repo for tarball-mode updates. Hard-coded because by definition the
+# tarball install has no `git remote` to read from.
+UPSTREAM_OWNER = "enfierno21"
+UPSTREAM_REPO = "DarkWebScanner"
+DEFAULT_BRANCH = "main"
+USER_AGENT = "DarkWebScanner-Updater"
+
+INSTALLED_SHA_FILE = ROOT / "data" / "installed_sha.txt"
+
+# Paths the tarball-mode extractor must never touch — operator data, virtual
+# envs, build caches. Matched as path-prefixes (forward slashes, relative to
+# ROOT) and as basename glob patterns.
+_PRESERVE_PREFIXES = (
+    "data/", "data",
+    ".venv/", "backend/.venv/",
+    ".pytest_cache/",
+    "__pycache__/", "backend/__pycache__/", "tests/__pycache__/",
+    ".git/",
+)
+_PRESERVE_GLOBS = ("*.db", "*.db-wal", "*.db-shm", "*.pyc", "*.pyo", ".DS_Store")
 
 
 def _git_available() -> bool:
@@ -49,15 +83,13 @@ def _is_repo_sync() -> bool:
         return False
 
 
-async def status() -> dict:
-    if not _git_available():
-        return {"is_repo": False, "error": "git is not installed on this host"}
-    if not await asyncio.to_thread(_is_repo_sync):
-        return {"is_repo": False, "error": "not a git checkout"}
+# ── git mode ─────────────────────────────────────────────────────────────────
 
+async def _git_status() -> dict:
     rc, branch, _ = await _git("rev-parse", "--abbrev-ref", "HEAD")
     if rc != 0 or not branch:
-        return {"is_repo": True, "error": "could not determine current branch"}
+        return {"is_repo": True, "available": True, "mode": "git",
+                "error": "could not determine current branch"}
 
     _, head_sha, _ = await _git("rev-parse", "--short", "HEAD")
     _, head_full, _ = await _git("rev-parse", "HEAD")
@@ -83,6 +115,8 @@ async def status() -> dict:
 
     return {
         "is_repo": True,
+        "available": True,
+        "mode": "git",
         "branch": branch,
         "head_sha": head_sha,
         "head_full": head_full,
@@ -97,12 +131,7 @@ async def status() -> dict:
     }
 
 
-async def apply_update() -> dict:
-    if not _git_available():
-        return {"ok": False, "error": "git is not installed on this host"}
-    if not await asyncio.to_thread(_is_repo_sync):
-        return {"ok": False, "error": "not a git checkout"}
-
+async def _git_apply() -> dict:
     rc, branch, _ = await _git("rev-parse", "--abbrev-ref", "HEAD")
     if rc != 0 or not branch:
         return {"ok": False, "error": "could not determine current branch"}
@@ -132,3 +161,186 @@ async def apply_update() -> dict:
         "summary": log_out.splitlines() if log_out else [],
         "restart_needed": before_sha != after_sha,
     }
+
+
+# ── tarball mode ─────────────────────────────────────────────────────────────
+
+def _read_installed_sha() -> str | None:
+    try:
+        text = INSTALLED_SHA_FILE.read_text().strip()
+        return text or None
+    except (FileNotFoundError, OSError):
+        return None
+
+
+def _write_installed_sha(sha: str) -> None:
+    INSTALLED_SHA_FILE.parent.mkdir(parents=True, exist_ok=True)
+    INSTALLED_SHA_FILE.write_text(sha + "\n")
+
+
+async def _fetch_latest_commit(branch: str) -> dict:
+    """Returns {'sha': full, 'short': 7-char, 'subject': first-line}."""
+    url = f"https://api.github.com/repos/{UPSTREAM_OWNER}/{UPSTREAM_REPO}/commits/{branch}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(url, headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "application/vnd.github+json",
+        })
+    r.raise_for_status()
+    j = r.json()
+    sha = j["sha"]
+    msg = (j.get("commit") or {}).get("message", "") or ""
+    return {"sha": sha, "short": sha[:7], "subject": msg.splitlines()[0] if msg else ""}
+
+
+async def _download_tarball(sha: str) -> bytes:
+    url = f"https://codeload.github.com/{UPSTREAM_OWNER}/{UPSTREAM_REPO}/tar.gz/{sha}"
+    async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+        r = await client.get(url, headers={"User-Agent": USER_AGENT})
+    r.raise_for_status()
+    return r.content
+
+
+def _is_preserved(rel_path: str) -> bool:
+    """True if this relative path (forward slashes, no leading ./) must NOT
+    be touched by the tarball overlay — operator data, venvs, caches."""
+    norm = rel_path.replace("\\", "/")
+    if norm.startswith("./"):
+        norm = norm[2:]
+    for prefix in _PRESERVE_PREFIXES:
+        if norm == prefix.rstrip("/") or norm.startswith(prefix):
+            return True
+    name = norm.rsplit("/", 1)[-1]
+    return any(fnmatch.fnmatch(name, pat) for pat in _PRESERVE_GLOBS)
+
+
+def _extract_tarball_over_root(data: bytes) -> int:
+    """Overlay the tarball at `data` onto ROOT. Skips preserved paths and
+    refuses any entry that would write outside ROOT. Returns count of files
+    written."""
+    written = 0
+    root_resolved = ROOT.resolve()
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+        members = tf.getmembers()
+        if not members:
+            raise RuntimeError("empty tarball")
+        # GitHub tarballs wrap everything in a single top-level dir.
+        top = members[0].name.split("/", 1)[0]
+        prefix = top + "/"
+        for m in members:
+            if not m.name.startswith(prefix):
+                continue
+            rel = m.name[len(prefix):]
+            if not rel or _is_preserved(rel):
+                continue
+            target = ROOT / rel
+            try:
+                target_resolved = target.resolve()
+                target_resolved.relative_to(root_resolved)
+            except (ValueError, OSError):
+                continue  # path traversal guard
+            if m.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif m.isfile():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                src = tf.extractfile(m)
+                if src is None:
+                    continue
+                with open(target, "wb") as out:
+                    shutil.copyfileobj(src, out)
+                try:
+                    os.chmod(target, m.mode & 0o777)
+                except OSError:
+                    pass
+                written += 1
+            # symlinks and other types are intentionally skipped
+    return written
+
+
+async def _tarball_status() -> dict:
+    branch = DEFAULT_BRANCH
+    installed = _read_installed_sha()
+
+    base = {
+        "is_repo": False,
+        "available": True,
+        "mode": "tarball",
+        "branch": branch,
+        "head_sha": installed[:7] if installed else None,
+        "head_full": installed,
+        "head_subject": None,
+        "ahead": 0,
+        "dirty": False,
+    }
+
+    try:
+        latest = await _fetch_latest_commit(branch)
+    except Exception as e:
+        return {**base, "upstream_sha": None, "behind": 0, "fetched": False,
+                "fetch_error": f"github api: {e}", "update_available": False}
+
+    # First run after upgrading to the tarball-aware updater: we don't yet know
+    # what's installed, so offer the apply to pin the SHA file.
+    if installed is None:
+        update_available = True
+    else:
+        update_available = installed != latest["sha"]
+
+    return {
+        **base,
+        "head_subject": None if installed else "(installed commit unknown — apply to pin)",
+        "upstream_sha": latest["short"],
+        "upstream_subject": latest["subject"],
+        "behind": 1 if update_available else 0,
+        "fetched": True,
+        "fetch_error": None,
+        "update_available": update_available,
+    }
+
+
+async def _tarball_apply() -> dict:
+    branch = DEFAULT_BRANCH
+    installed = _read_installed_sha()
+    before_short = installed[:7] if installed else "unknown"
+
+    try:
+        latest = await _fetch_latest_commit(branch)
+    except Exception as e:
+        return {"ok": False, "error": f"github api: {e}"}
+
+    if installed and installed == latest["sha"]:
+        return {"ok": False, "error": "already at latest commit"}
+
+    try:
+        data = await _download_tarball(latest["sha"])
+    except Exception as e:
+        return {"ok": False, "error": f"download failed: {e}"}
+
+    try:
+        await asyncio.to_thread(_extract_tarball_over_root, data)
+    except Exception as e:
+        return {"ok": False, "error": f"extract failed: {e}"}
+
+    _write_installed_sha(latest["sha"])
+
+    return {
+        "ok": True,
+        "before_sha": before_short,
+        "after_sha": latest["short"],
+        "summary": [f"{latest['short']} {latest['subject']}".rstrip()],
+        "restart_needed": True,
+    }
+
+
+# ── public API ───────────────────────────────────────────────────────────────
+
+async def status() -> dict:
+    if await asyncio.to_thread(_is_repo_sync):
+        return await _git_status()
+    return await _tarball_status()
+
+
+async def apply_update() -> dict:
+    if await asyncio.to_thread(_is_repo_sync):
+        return await _git_apply()
+    return await _tarball_apply()
