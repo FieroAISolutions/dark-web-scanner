@@ -572,6 +572,107 @@ def test_short_err_trims_verbose_messages():
     assert "RuntimeError" in updater._short_err(e)
 
 
+# ── auth: GitHub token plumbing ──────────────────────────────────────────────
+
+def test_diagnose_404_without_token_suggests_setup(monkeypatch):
+    monkeypatch.setattr(updater, "_get_github_token", lambda: "")
+    hint = updater._diagnose_http_error(RuntimeError(
+        "Client error '404 Not Found' for url 'https://api.github.com/...'"
+    ))
+    assert "private repo" in hint
+    assert "GitHub token" in hint
+
+
+def test_diagnose_404_with_token_does_not_suggest_setup(monkeypatch):
+    monkeypatch.setattr(updater, "_get_github_token", lambda: "ghp_xxx")
+    hint = updater._diagnose_http_error(RuntimeError("404"))
+    assert "private repo" not in hint
+
+
+def test_diagnose_401_suggests_token_scope(monkeypatch):
+    monkeypatch.setattr(updater, "_get_github_token", lambda: "ghp_xxx")
+    hint = updater._diagnose_http_error(RuntimeError(
+        "Client error '401 Unauthorized' for url ..."
+    ))
+    assert "token rejected" in hint or "scope" in hint
+
+
+def test_auth_headers_empty_without_token(monkeypatch):
+    monkeypatch.setattr(updater, "_get_github_token", lambda: "")
+    assert updater._auth_headers() == {}
+
+
+def test_auth_headers_present_with_token(monkeypatch):
+    monkeypatch.setattr(updater, "_get_github_token", lambda: "ghp_secret")
+    assert updater._auth_headers() == {"Authorization": "Bearer ghp_secret"}
+
+
+@pytest.mark.asyncio
+async def test_fetch_latest_commit_sends_authorization_header(monkeypatch):
+    """End-to-end: a token stored in config must reach the GitHub API as a
+    Bearer header on the commits endpoint."""
+    monkeypatch.setattr(updater, "_get_github_token", lambda: "ghp_unit_test")
+
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"sha": "a" * 40, "commit": {"message": "hello world"}}
+
+    class FakeClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url, headers=None):
+            captured["url"] = url
+            captured["headers"] = headers or {}
+            return FakeResponse()
+
+    monkeypatch.setattr(updater.httpx, "AsyncClient", FakeClient)
+    out = await updater._fetch_latest_commit("main")
+    assert out["sha"] == "a" * 40
+    assert captured["headers"].get("Authorization") == "Bearer ghp_unit_test"
+    assert "commits/main" in captured["url"]
+
+
+@pytest.mark.asyncio
+async def test_download_tarball_uses_api_endpoint_with_auth(monkeypatch):
+    monkeypatch.setattr(updater, "_get_github_token", lambda: "ghp_unit_test")
+
+    captured = {}
+
+    class FakeResponse:
+        content = b"fake tarball bytes"
+        def raise_for_status(self): pass
+
+    class FakeClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url, headers=None):
+            captured["url"] = url
+            captured["headers"] = headers or {}
+            return FakeResponse()
+
+    monkeypatch.setattr(updater.httpx, "AsyncClient", FakeClient)
+    out = await updater._download_tarball("a" * 40)
+    assert out == b"fake tarball bytes"
+    assert "api.github.com" in captured["url"]
+    assert "/tarball/" in captured["url"]
+    assert captured["headers"].get("Authorization") == "Bearer ghp_unit_test"
+
+
+@pytest.mark.asyncio
+async def test_get_github_token_swallows_db_failure(monkeypatch):
+    """If the DB read raises (e.g. very early boot), token lookup must fall
+    back to empty string rather than crashing the updater."""
+    def boom():
+        raise RuntimeError("db not initialized")
+    monkeypatch.setattr(updater.config_mod, "get_full", boom)
+    assert updater._get_github_token() == ""
+
+
 # ── HTTP layer ────────────────────────────────────────────────────────────────
 
 def test_status_endpoint_requires_auth(anon_client):

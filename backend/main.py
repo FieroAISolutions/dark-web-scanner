@@ -712,6 +712,15 @@ async def api_update_status(refresh: int = 0):
     return await updater.status(force_refresh=bool(refresh))
 
 
+@app.post("/api/config/clear-github-token", dependencies=protected)
+async def api_clear_github_token():
+    # Bypass config_mod.update()'s secret-preservation guard (which keeps
+    # empty values from clobbering stored secrets). A direct DB update is the
+    # only way to explicitly wipe the field.
+    db.update_config({"github_token": ""})
+    return config_mod.get_public()
+
+
 @app.post("/api/update/apply", dependencies=protected)
 async def api_update_apply():
     return await updater.apply_update()

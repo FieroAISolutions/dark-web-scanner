@@ -1,11 +1,12 @@
 from . import db, secrets_store
 
 
-SECRET_FIELDS = {"hibp_api_key", "smtp_pass", "webhook_url"}
+SECRET_FIELDS = {"hibp_api_key", "smtp_pass", "webhook_url", "github_token"}
 ALLOWED_FIELDS = {
     "enabled", "interval_hours", "hibp_api_key", "hibp_rpm", "include_pastes",
     "alert_on_new", "smtp_host", "smtp_port", "smtp_user", "smtp_pass",
     "from_addr", "to_email", "webhook_url", "webhook_kind", "user_agent",
+    "github_token",
 }
 WEBHOOK_KINDS = {"slack", "discord", "generic", ""}
 
@@ -29,6 +30,7 @@ def get_public() -> dict:
     out["hibp_api_key_set"] = bool(full["hibp_api_key"])
     out["smtp_pass_set"] = bool(full["smtp_pass"])
     out["webhook_url_set"] = bool(full["webhook_url"])
+    out["github_token_set"] = bool(full.get("github_token"))
     return out
 
 

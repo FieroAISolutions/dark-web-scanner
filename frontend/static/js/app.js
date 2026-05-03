@@ -123,6 +123,7 @@ function initNav() {
     if (id === 'cfg-regen-btn')          btn.addEventListener('click', regenerateToken);
     if (id === 'upd-check-btn')          btn.addEventListener('click', () => checkForUpdates(true));
     if (id === 'upd-apply-btn')          btn.addEventListener('click', applyUpdate);
+    if (id === 'cfg-github-token-clear-btn') btn.addEventListener('click', clearGithubToken);
     if (id === 'group-create-btn')       btn.addEventListener('click', createGroup);
     if (id === 'report-open-btn')        btn.addEventListener('click', () => openReport(false));
     if (id === 'report-download-btn')    btn.addEventListener('click', () => openReport(true));
@@ -692,6 +693,13 @@ async function loadConfig() {
     $('cfg-smtp-pass-status').textContent = d.smtp_pass_set
       ? 'Password saved (leave blank to keep).'
       : 'No password saved.';
+
+    const ghEl = $('cfg-github-token-status');
+    if (ghEl) {
+      ghEl.textContent = d.github_token_set
+        ? 'Token on file (leave blank to keep, enter new token to replace).'
+        : 'No token set — only needed if the upstream repo is private.';
+    }
   } catch (e) {
     console.warn('loadConfig:', e);
   }
@@ -713,6 +721,7 @@ async function saveConfig() {
     to_email:       $('cfg-to').value,
     webhook_url:    $('cfg-webhook-url').value,
     webhook_kind:   $('cfg-webhook-kind').value,
+    github_token:   $('cfg-github-token')?.value || '',
   };
   try {
     _setStatus('cfg-schedule-status', 'Saving…', '');
@@ -726,7 +735,11 @@ async function saveConfig() {
       '#3fb950');
     $('cfg-hibp-key').value = '';
     $('cfg-smtp-pass').value = '';
+    if ($('cfg-github-token')) $('cfg-github-token').value = '';
     loadConfig();
+    // The updater reads the token on its next status check; force-refresh so
+    // the operator sees the result of pasting a fresh token immediately.
+    if (document.getElementById('upd-state')) checkForUpdates(true);
     setTimeout(() => _setStatus('cfg-schedule-status', '', ''), 4000);
   } catch (e) {
     _setStatus('cfg-schedule-status', 'Error: ' + e.message, '#f85149');
@@ -1163,6 +1176,20 @@ async function applyUpdate() {
     checkForUpdates(true);
   } catch (e) {
     _setStatus('upd-msg', 'Error: ' + e.message, '#f85149');
+  }
+}
+
+async function clearGithubToken() {
+  if (!confirm('Remove the GitHub token? Updates from a private upstream repo will stop working.')) return;
+  try {
+    _setStatus('cfg-github-token-clear-status', 'Clearing…', '');
+    await _apiFetch('/api/config/clear-github-token', { method: 'POST' });
+    if ($('cfg-github-token')) $('cfg-github-token').value = '';
+    _setStatus('cfg-github-token-clear-status', 'Token cleared.', '#3fb950');
+    loadConfig();
+    if (document.getElementById('upd-state')) checkForUpdates(true);
+  } catch (e) {
+    _setStatus('cfg-github-token-clear-status', 'Error: ' + e.message, '#f85149');
   }
 }
 

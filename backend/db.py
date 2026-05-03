@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS config (
     webhook_kind TEXT NOT NULL DEFAULT 'generic',
     user_agent TEXT NOT NULL DEFAULT 'DarkWebScanner/1.0',
     admin_token_hash TEXT NOT NULL DEFAULT '',
-    admin_password_hash TEXT NOT NULL DEFAULT ''
+    admin_password_hash TEXT NOT NULL DEFAULT '',
+    github_token TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS groups (
@@ -122,6 +123,7 @@ _EXPECTED_CONFIG_COLUMNS = {
     "user_agent": "TEXT NOT NULL DEFAULT 'DarkWebScanner/1.0'",
     "admin_token_hash": "TEXT NOT NULL DEFAULT ''",
     "admin_password_hash": "TEXT NOT NULL DEFAULT ''",
+    "github_token": "TEXT NOT NULL DEFAULT ''",
 }
 
 

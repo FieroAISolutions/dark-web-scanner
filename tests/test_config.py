@@ -6,15 +6,35 @@ def test_get_public_masks_secrets():
         "hibp_api_key": "very-secret",
         "smtp_pass": "pass-1234",
         "webhook_url": "https://hooks.example.com/abc",
+        "github_token": "ghp_supersecret",
     })
     pub = config.get_public()
     assert "hibp_api_key" not in pub
     assert "smtp_pass" not in pub
     assert "webhook_url" not in pub
+    assert "github_token" not in pub
     assert "admin_token_hash" not in pub
     assert pub["hibp_api_key_set"] is True
     assert pub["smtp_pass_set"] is True
     assert pub["webhook_url_set"] is True
+    assert pub["github_token_set"] is True
+
+
+def test_github_token_round_trip_and_clear_endpoint(client):
+    config.update({"github_token": "ghp_round_trip"})
+    assert config.get_full()["github_token"] == "ghp_round_trip"
+    assert secrets_store.is_encrypted(db.get_config_row()["github_token"])
+
+    r = client.post("/api/config/clear-github-token")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["github_token_set"] is False
+    assert config.get_full()["github_token"] == ""
+
+
+def test_clear_github_token_requires_auth(anon_client):
+    r = anon_client.post("/api/config/clear-github-token")
+    assert r.status_code == 401
 
 
 def test_get_full_decrypts_secrets():

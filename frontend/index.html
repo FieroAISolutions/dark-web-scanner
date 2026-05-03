@@ -344,6 +344,24 @@
           <button id="upd-apply-btn" class="primary" disabled>Apply update</button>
           <span id="upd-msg" class="status"></span>
         </div>
+
+        <div class="form-row" style="margin-top:1rem">
+          <label for="cfg-github-token">GitHub token (private repo)</label>
+          <input type="password" id="cfg-github-token"
+                 placeholder="leave blank to keep existing token"
+                 autocomplete="off">
+          <div id="cfg-github-token-status" class="muted small"></div>
+          <p class="muted small">
+            Required only if the upstream repo is private. Use a fine-grained
+            personal access token with read access to the repo (Contents:
+            Read). Stored encrypted in the local DB. Click
+            <em>Save schedule &amp; integrations</em> below to apply.
+          </p>
+          <div class="actions">
+            <button id="cfg-github-token-clear-btn" class="danger">Clear token</button>
+            <span id="cfg-github-token-clear-status" class="status"></span>
+          </div>
+        </div>
       </div>
 
       <div class="card">

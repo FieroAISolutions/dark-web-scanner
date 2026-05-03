@@ -36,6 +36,8 @@ from pathlib import Path
 
 import httpx
 
+from . import config as config_mod
+
 ROOT = Path(__file__).resolve().parent.parent
 
 log = logging.getLogger("dws.updater")
@@ -110,6 +112,32 @@ def _short_err(e: Exception) -> str:
     msg = (str(e) or "").split("\n", 1)[0].strip()
     out = f"{cls}: {msg}" if msg else cls
     return out[:200]
+
+
+def _get_github_token() -> str:
+    """Read the GitHub PAT from config (decrypted). Empty if unset or DB
+    unavailable. Lets the updater authenticate against private upstream repos."""
+    try:
+        return (config_mod.get_full().get("github_token") or "").strip()
+    except Exception:
+        return ""
+
+
+def _auth_headers() -> dict:
+    token = _get_github_token()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _diagnose_http_error(e: Exception) -> str:
+    """Append a setup hint when the upstream call hit a likely auth wall.
+    Empty repo or wrong branch will also surface as 404, so we only suggest
+    the token path when no token is currently configured."""
+    text = str(e)
+    if "404" in text and not _get_github_token():
+        return " (private repo? configure a GitHub token in this card)"
+    if "401" in text or "403" in text:
+        return " (token rejected — check it has `repo` read scope)"
+    return ""
 
 
 # ── git mode ─────────────────────────────────────────────────────────────────
@@ -210,11 +238,13 @@ def _write_installed_sha(sha: str) -> None:
 async def _fetch_latest_commit(branch: str) -> dict:
     """Returns {'sha': full, 'short': 7-char, 'subject': first-line}."""
     url = f"https://api.github.com/repos/{UPSTREAM_OWNER}/{UPSTREAM_REPO}/commits/{branch}"
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/vnd.github+json",
+        **_auth_headers(),
+    }
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(url, headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "application/vnd.github+json",
-        })
+        r = await client.get(url, headers=headers)
     r.raise_for_status()
     j = r.json()
     sha = j["sha"]
@@ -235,9 +265,18 @@ async def _fetch_latest_commit_cached(branch: str, *, force: bool) -> dict:
 
 
 async def _download_tarball(sha: str) -> bytes:
-    url = f"https://codeload.github.com/{UPSTREAM_OWNER}/{UPSTREAM_REPO}/tar.gz/{sha}"
+    # The /tarball/ API endpoint accepts the same Bearer token as /commits and
+    # works for both public and private repos, redirecting to the signed CDN
+    # URL. codeload.github.com would require a separate auth path for private
+    # repos — using the API endpoint avoids that branching.
+    url = f"https://api.github.com/repos/{UPSTREAM_OWNER}/{UPSTREAM_REPO}/tarball/{sha}"
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/vnd.github+json",
+        **_auth_headers(),
+    }
     async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-        r = await client.get(url, headers={"User-Agent": USER_AGENT})
+        r = await client.get(url, headers=headers)
     r.raise_for_status()
     return r.content
 
@@ -406,7 +445,8 @@ async def _tarball_status(*, force_refresh: bool) -> dict:
     except Exception as e:
         log.warning("updater: github api failed: %s", _short_err(e))
         return {**base, "upstream_sha": None, "behind": 0, "fetched": False,
-                "fetch_error": _short_err(e), "update_available": False}
+                "fetch_error": _short_err(e) + _diagnose_http_error(e),
+                "update_available": False}
 
     if installed is None:
         # First run after upgrading to the tarball-aware updater: we don't yet
@@ -446,7 +486,8 @@ async def _tarball_apply_locked() -> dict:
         latest = await _fetch_latest_commit_cached(branch, force=True)
     except Exception as e:
         log.warning("updater: github api failed: %s", _short_err(e))
-        return {"ok": False, "error": f"github api: {_short_err(e)}"}
+        return {"ok": False,
+                "error": f"github api: {_short_err(e)}{_diagnose_http_error(e)}"}
 
     if installed and installed == latest["sha"]:
         return {"ok": False, "error": "already at latest commit"}
