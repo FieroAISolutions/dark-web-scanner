@@ -1051,34 +1051,40 @@ function _reportUrl() {
 }
 
 async function openReport(download) {
-  _setStatus('report-status', 'Building…', '');
   const url = _reportUrl();
+
+  if (!download) {
+    // Navigate the new tab directly to the report URL so the *response's* own
+    // CSP applies (a relaxed one that permits the inline window.print()
+    // handler). Previously we fetched + document.write()'d into an
+    // about:blank window, which inherited the SPA's strict CSP and silently
+    // blocked the print button. Cookies ride along on same-origin navigations
+    // so auth needs no extra plumbing.
+    const w = window.open(url, '_blank');
+    if (!w) {
+      _setStatus('report-status', 'Pop-up blocked — use Download instead.', '#f85149');
+      return;
+    }
+    _setStatus('report-status', 'Opened.', '#3fb950');
+    setTimeout(() => _setStatus('report-status', '', ''), 4000);
+    return;
+  }
+
+  _setStatus('report-status', 'Building…', '');
   try {
     const r = await _apiFetch(url, { timeoutMs: 60000 });
     const html = await r.text();
-    if (download) {
-      const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-      const objUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = objUrl;
-      const stamp = new Date().toISOString().slice(0, 10);
-      const gname = ($('report-group')?.options[$('report-group').selectedIndex]?.text || 'all')
-        .replace(/[^a-z0-9]+/gi, '-').toLowerCase();
-      a.download = `darkwebscanner-${gname}-${stamp}.html`;
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(objUrl), 5000);
-      _setStatus('report-status', 'Downloaded.', '#3fb950');
-    } else {
-      const w = window.open('', '_blank');
-      if (!w) {
-        _setStatus('report-status', 'Pop-up blocked — use Download instead.', '#f85149');
-        return;
-      }
-      w.document.open();
-      w.document.write(html);
-      w.document.close();
-      _setStatus('report-status', 'Opened.', '#3fb950');
-    }
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = objUrl;
+    const stamp = new Date().toISOString().slice(0, 10);
+    const gname = ($('report-group')?.options[$('report-group').selectedIndex]?.text || 'all')
+      .replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+    a.download = `darkwebscanner-${gname}-${stamp}.html`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(objUrl), 5000);
+    _setStatus('report-status', 'Downloaded.', '#3fb950');
     setTimeout(() => _setStatus('report-status', '', ''), 4000);
   } catch (e) {
     _setStatus('report-status', 'Error: ' + e.message, '#f85149');

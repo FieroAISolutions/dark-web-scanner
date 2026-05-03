@@ -147,3 +147,20 @@ def test_report_endpoint_default_30_day_window(client):
     r = client.get("/api/report")  # no since, no days → default 30
     assert r.status_code == 200
     assert "Since" in r.text  # "Since YYYY-MM-DD …"
+
+
+def test_report_response_relaxes_csp_for_inline_print_button(client):
+    """The 'Print / Save as PDF' button uses an inline onclick handler. The
+    response must ship a CSP that allows inline scripts so the button works
+    when opened in a new tab (otherwise the SPA's strict CSP would block it)."""
+    r = client.get("/api/report")
+    csp = r.headers.get("content-security-policy", "")
+    assert csp, "report response must set its own CSP"
+    assert "'unsafe-inline'" in csp
+    assert "script-src" in csp
+    assert "frame-ancestors 'none'" in csp
+
+
+def test_report_response_disables_caching(client):
+    r = client.get("/api/report")
+    assert "no-store" in r.headers.get("cache-control", "").lower()

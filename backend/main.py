@@ -682,10 +682,25 @@ async def api_report(group_id: Optional[int] = None, since: Optional[str] = None
         raise HTTPException(status_code=400, detail=str(e))
     data = reports.gather_report_data(group_id=group_id, since=since_norm)
     body = reports.render(data)
+    # Custom CSP for the report response: allow the inline `onclick="window.print()"`
+    # handler. All variable content in the report is html.escape()'d at render
+    # time, so the XSS surface is bounded; this trade buys us a 'Print / Save
+    # as PDF' button that works whether the report is opened in a new tab via
+    # the SPA or saved + opened as a standalone .html file.
     return Response(
         content=body,
         media_type="text/html; charset=utf-8",
-        headers={"Cache-Control": "no-store"},
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": (
+                "default-src 'self'; "
+                "script-src 'self' 'unsafe-inline'; "
+                "style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data:; "
+                "frame-ancestors 'none'; "
+                "base-uri 'self'"
+            ),
+        },
     )
 
 
