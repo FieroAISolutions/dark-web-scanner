@@ -5,15 +5,6 @@ BACKEND="$SCRIPT_DIR/backend"
 DATA="$SCRIPT_DIR/data"
 mkdir -p "$DATA"
 
-# ── upstream repo for the in-app updater ─────────────────────────────────────
-# By default the updater fetches from the same GitHub repo this code came from.
-# If you've set up a public mirror repo (see .github/workflows/mirror-to-public.yml),
-# uncomment and adjust to make operator hosts pull from the public channel —
-# no GitHub token required on the host.
-# export DWS_UPSTREAM_OWNER="enfierno21"
-# export DWS_UPSTREAM_REPO="DarkWebScanner-Public"
-# export DWS_UPSTREAM_BRANCH="main"
-
 if ! command -v python3 &>/dev/null; then
   echo "ERROR: python3 not found. Install Python 3.10+ and retry."
   exit 1

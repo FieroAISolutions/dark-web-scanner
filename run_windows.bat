@@ -6,15 +6,6 @@ set DATA=%SCRIPT_DIR%data
 
 if not exist "%DATA%" mkdir "%DATA%"
 
-REM ── upstream repo for the in-app updater ────────────────────────────────────
-REM By default the updater fetches from the same GitHub repo this code came
-REM from. If you've set up a public mirror (see .github/workflows/
-REM mirror-to-public.yml), uncomment and adjust to make operator hosts pull
-REM from the public channel - no GitHub token required on the host.
-REM set DWS_UPSTREAM_OWNER=enfierno21
-REM set DWS_UPSTREAM_REPO=DarkWebScanner-Public
-REM set DWS_UPSTREAM_BRANCH=main
-
 cd /d "%SCRIPT_DIR%"
 
 where python >nul 2>&1
