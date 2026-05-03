@@ -162,6 +162,10 @@ button.danger { color: var(--bad); }
   display: flex; align-items: center; justify-content: center;
   z-index: 1000;
 }
+/* `display: flex` above otherwise overrides the user-agent `[hidden] { display:
+   none }` rule because they share specificity and the class rule comes later.
+   This restores the expected hide-on-attribute behaviour for the modals. */
+.overlay[hidden] { display: none; }
 .overlay-card {
   background: var(--panel);
   border: 1px solid var(--border);
