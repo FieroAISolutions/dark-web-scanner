@@ -42,6 +42,11 @@ body {
 .ws-status.ok   { color: var(--good); }
 .ws-status.bad  { color: var(--bad);  }
 
+.group-filter { display: flex; align-items: center; gap: 6px; }
+.group-filter select {
+  width: auto; min-width: 140px; padding: 4px 8px; font-size: 13px;
+}
+
 main { padding: 16px; max-width: 1200px; margin: 0 auto; }
 
 .cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin-bottom: 12px; }

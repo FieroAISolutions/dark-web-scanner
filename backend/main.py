@@ -294,11 +294,27 @@ async def security_headers(request: Request, call_next):
 
 class EmailListReq(BaseModel):
     emails: list[str] = Field(default_factory=list)
+    group_id: Optional[int] = None
 
 
 class ScanReq(BaseModel):
     emails: Optional[list[str]] = None
     persist: bool = True
+    group_id: Optional[int] = None  # if set, scan only this group's emails
+
+
+class GroupCreateReq(BaseModel):
+    name: str
+    description: str = ""
+
+
+class GroupUpdateReq(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+
+class EmailGroupReq(BaseModel):
+    group_id: Optional[int] = None  # null moves to "ungrouped"
 
 
 class LoginReq(BaseModel):
@@ -478,8 +494,8 @@ def _normalize_emails(items: list[str]) -> tuple[list[str], list[str]]:
 
 
 @app.get("/api/emails", dependencies=protected)
-async def api_list_emails():
-    return {"emails": db.list_emails()}
+async def api_list_emails(group_id: Optional[int] = None):
+    return {"emails": db.list_emails(group_id=group_id)}
 
 
 @app.post("/api/emails", dependencies=protected)
@@ -488,7 +504,9 @@ async def api_add_emails(req: EmailListReq):
     if not valid:
         raise HTTPException(status_code=400,
                             detail=f"No valid emails. Invalid: {invalid}")
-    added, skipped = db.add_emails(valid)
+    if req.group_id is not None and db.get_group(req.group_id) is None:
+        raise HTTPException(status_code=400, detail="unknown group_id")
+    added, skipped = db.add_emails(valid, group_id=req.group_id)
     return {"added": added, "skipped": skipped, "invalid": invalid}
 
 
@@ -501,25 +519,87 @@ async def api_remove_email(email: str):
     return {"removed": e}
 
 
+@app.patch("/api/emails/{email}/group", dependencies=protected)
+async def api_set_email_group(email: str, req: EmailGroupReq):
+    e = email.strip().lower()
+    if req.group_id is not None and db.get_group(req.group_id) is None:
+        raise HTTPException(status_code=400, detail="unknown group_id")
+    ok = db.set_email_group(e, req.group_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="not monitored")
+    return {"ok": True, "email": e, "group_id": req.group_id}
+
+
 @app.get("/api/dashboard", dependencies=protected)
-async def api_dashboard():
-    stats = db.dashboard_stats()
+async def api_dashboard(group_id: Optional[int] = None):
+    stats = db.dashboard_stats(group_id=group_id)
     stats["next_run_at"] = scheduler.next_run_time()
     stats["scan_in_progress"] = _scan_lock.locked()
-    stats["recent_findings"] = db.list_findings(limit=10)
+    stats["recent_findings"] = db.list_findings(limit=10, group_id=group_id)
     stats["recent_runs"] = db.recent_runs(limit=5)
-    stats["severity_counts"] = db.severity_counts()
+    stats["severity_counts"] = db.severity_counts(group_id=group_id)
+    stats["group_id"] = group_id
     return stats
 
 
 @app.get("/api/findings", dependencies=protected)
-async def api_findings(limit: int = 200):
-    return {"findings": db.list_findings(limit=min(max(limit, 1), 1000))}
+async def api_findings(limit: int = 200, group_id: Optional[int] = None):
+    return {"findings": db.list_findings(
+        limit=min(max(limit, 1), 1000), group_id=group_id)}
 
 
 @app.get("/api/pastes", dependencies=protected)
-async def api_pastes(limit: int = 200):
-    return {"pastes": db.list_pastes(limit=min(max(limit, 1), 1000))}
+async def api_pastes(limit: int = 200, group_id: Optional[int] = None):
+    return {"pastes": db.list_pastes(
+        limit=min(max(limit, 1), 1000), group_id=group_id)}
+
+
+# ── routes: groups ────────────────────────────────────────────────────────────
+
+
+@app.get("/api/groups", dependencies=protected)
+async def api_list_groups():
+    return {"groups": db.list_groups()}
+
+
+@app.post("/api/groups", dependencies=protected)
+async def api_create_group(req: GroupCreateReq):
+    name = (req.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    if len(name) > 80:
+        raise HTTPException(status_code=400, detail="name too long (max 80)")
+    if db.get_group_by_name(name):
+        raise HTTPException(status_code=409, detail="a group with that name already exists")
+    gid = db.create_group(name=name, description=(req.description or "").strip())
+    return {"id": gid, "name": name}
+
+
+@app.patch("/api/groups/{group_id}", dependencies=protected)
+async def api_update_group(group_id: int, req: GroupUpdateReq):
+    existing = db.get_group(group_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="group not found")
+    name = req.name.strip() if req.name is not None else None
+    if name is not None:
+        if not name:
+            raise HTTPException(status_code=400, detail="name cannot be empty")
+        if len(name) > 80:
+            raise HTTPException(status_code=400, detail="name too long (max 80)")
+        existing_other = db.get_group_by_name(name)
+        if existing_other and existing_other["id"] != group_id:
+            raise HTTPException(status_code=409, detail="another group already has that name")
+    description = req.description.strip() if req.description is not None else None
+    db.update_group(group_id, name=name, description=description)
+    return db.get_group(group_id)
+
+
+@app.delete("/api/groups/{group_id}", dependencies=protected)
+async def api_delete_group(group_id: int):
+    ok, err = db.delete_group(group_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail=err)
+    return {"ok": True}
 
 
 @app.get("/api/scan/runs", dependencies=protected)
@@ -544,9 +624,12 @@ async def api_scan(req: ScanReq):
                                 detail=f"No valid emails. Invalid: {invalid}")
         emails = valid
     else:
-        emails = db.get_emails()
+        if req.group_id is not None and db.get_group(req.group_id) is None:
+            raise HTTPException(status_code=400, detail="unknown group_id")
+        emails = db.get_emails(group_id=req.group_id)
         if not emails:
-            raise HTTPException(status_code=400, detail="No monitored emails")
+            scope = f" in group {req.group_id}" if req.group_id is not None else ""
+            raise HTTPException(status_code=400, detail=f"No monitored emails{scope}")
     return await _execute_scan(emails, persist=bool(req.persist))
 
 

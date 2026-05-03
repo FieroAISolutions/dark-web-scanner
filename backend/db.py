@@ -32,9 +32,17 @@ CREATE TABLE IF NOT EXISTS config (
     admin_password_hash TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS monitored_emails (
     email TEXT PRIMARY KEY,
-    added_at TEXT NOT NULL DEFAULT (datetime('now'))
+    added_at TEXT NOT NULL DEFAULT (datetime('now')),
+    group_id INTEGER REFERENCES groups(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS breaches (
@@ -126,11 +134,44 @@ def _migrate_config_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE config ADD COLUMN {col} {ddl}")
 
 
+DEFAULT_GROUP_NAME = "Default"
+
+
+def _migrate_monitored_emails_columns(conn: sqlite3.Connection) -> None:
+    """Add `group_id` to legacy monitored_emails tables and back-fill the
+    Default group so every existing email has a home."""
+    rows = conn.execute("PRAGMA table_info(monitored_emails)").fetchall()
+    existing = {r["name"] for r in rows}
+    if "group_id" not in existing:
+        conn.execute(
+            "ALTER TABLE monitored_emails ADD COLUMN group_id INTEGER "
+            "REFERENCES groups(id) ON DELETE SET NULL"
+        )
+
+    # Ensure a Default group exists; assign any orphan emails to it.
+    cur = conn.execute("SELECT id FROM groups WHERE name = ?", (DEFAULT_GROUP_NAME,))
+    row = cur.fetchone()
+    if row is None:
+        cur = conn.execute(
+            "INSERT INTO groups (name, description) VALUES (?, ?)",
+            (DEFAULT_GROUP_NAME, "Auto-created default group for ungrouped addresses"),
+        )
+        default_id = cur.lastrowid
+    else:
+        default_id = row["id"]
+
+    conn.execute(
+        "UPDATE monitored_emails SET group_id = ? WHERE group_id IS NULL",
+        (default_id,),
+    )
+
+
 def init() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
         conn.executescript(SCHEMA)
         _migrate_config_columns(conn)
+        _migrate_monitored_emails_columns(conn)
         cur = conn.execute("SELECT COUNT(*) FROM config")
         if cur.fetchone()[0] == 0:
             conn.execute("INSERT INTO config (id) VALUES (1)")
@@ -187,30 +228,54 @@ def update_config(fields: dict) -> None:
 
 # ── monitored emails ──────────────────────────────────────────────────────────
 
-def list_emails() -> list[dict]:
+def list_emails(group_id: Optional[int] = None) -> list[dict]:
+    sql = """
+        SELECT m.email, m.added_at, m.group_id, g.name AS group_name,
+               (SELECT COUNT(*) FROM email_breaches eb WHERE eb.email = m.email) AS breach_count,
+               (SELECT COUNT(*) FROM email_pastes  ep WHERE ep.email = m.email) AS paste_count,
+               (SELECT MAX(first_seen_at) FROM email_breaches eb WHERE eb.email = m.email) AS last_breach_at
+        FROM monitored_emails m
+        LEFT JOIN groups g ON g.id = m.group_id
+    """
+    params: list = []
+    if group_id is not None:
+        sql += " WHERE m.group_id = ?"
+        params.append(group_id)
+    sql += " ORDER BY m.email"
     with connect() as conn:
-        rows = conn.execute("""
-            SELECT m.email, m.added_at,
-                   (SELECT COUNT(*) FROM email_breaches eb WHERE eb.email = m.email) AS breach_count,
-                   (SELECT COUNT(*) FROM email_pastes  ep WHERE ep.email = m.email) AS paste_count,
-                   (SELECT MAX(first_seen_at) FROM email_breaches eb WHERE eb.email = m.email) AS last_breach_at
-            FROM monitored_emails m
-            ORDER BY m.email
-        """).fetchall()
+        rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
 
 @write
-def add_emails(emails: Iterable[str]) -> tuple[list[str], list[str]]:
+def add_emails(emails: Iterable[str], group_id: Optional[int] = None) -> tuple[list[str], list[str]]:
     added, skipped = [], []
     with connect() as conn:
+        if group_id is None:
+            row = conn.execute(
+                "SELECT id FROM groups WHERE name = ?", (DEFAULT_GROUP_NAME,)
+            ).fetchone()
+            group_id = row["id"] if row else None
         for email in emails:
             try:
-                conn.execute("INSERT INTO monitored_emails (email) VALUES (?)", (email,))
+                conn.execute(
+                    "INSERT INTO monitored_emails (email, group_id) VALUES (?, ?)",
+                    (email, group_id),
+                )
                 added.append(email)
             except sqlite3.IntegrityError:
                 skipped.append(email)
     return added, skipped
+
+
+@write
+def set_email_group(email: str, group_id: Optional[int]) -> bool:
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE monitored_emails SET group_id = ? WHERE email = ?",
+            (group_id, email),
+        )
+        return cur.rowcount > 0
 
 
 @write
@@ -220,9 +285,93 @@ def remove_email(email: str) -> bool:
         return cur.rowcount > 0
 
 
-def get_emails() -> list[str]:
+def get_emails(group_id: Optional[int] = None) -> list[str]:
     with connect() as conn:
-        return [r["email"] for r in conn.execute("SELECT email FROM monitored_emails ORDER BY email")]
+        if group_id is None:
+            rows = conn.execute("SELECT email FROM monitored_emails ORDER BY email")
+        else:
+            rows = conn.execute(
+                "SELECT email FROM monitored_emails WHERE group_id = ? ORDER BY email",
+                (group_id,),
+            )
+        return [r["email"] for r in rows]
+
+
+# ── groups CRUD ───────────────────────────────────────────────────────────────
+
+def list_groups() -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute("""
+            SELECT g.id, g.name, g.description, g.created_at,
+                   (SELECT COUNT(*) FROM monitored_emails m WHERE m.group_id = g.id) AS email_count
+            FROM groups g
+            ORDER BY g.name
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_group(group_id: int) -> Optional[dict]:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id, name, description, created_at FROM groups WHERE id = ?",
+            (group_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_group_by_name(name: str) -> Optional[dict]:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id, name, description, created_at FROM groups WHERE name = ?",
+            (name,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+@write
+def create_group(name: str, description: str = "") -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO groups (name, description) VALUES (?, ?)",
+            (name, description),
+        )
+        return cur.lastrowid
+
+
+@write
+def update_group(group_id: int, *, name: Optional[str] = None,
+                 description: Optional[str] = None) -> bool:
+    fields, vals = [], []
+    if name is not None:
+        fields.append("name = ?"); vals.append(name)
+    if description is not None:
+        fields.append("description = ?"); vals.append(description)
+    if not fields:
+        return False
+    vals.append(group_id)
+    with connect() as conn:
+        cur = conn.execute(
+            f"UPDATE groups SET {', '.join(fields)} WHERE id = ?", vals,
+        )
+        return cur.rowcount > 0
+
+
+@write
+def delete_group(group_id: int) -> tuple[bool, str]:
+    """Delete a group. Refuses if it's the Default group or still has emails."""
+    with connect() as conn:
+        row = conn.execute("SELECT name FROM groups WHERE id = ?", (group_id,)).fetchone()
+        if not row:
+            return False, "group not found"
+        if row["name"] == DEFAULT_GROUP_NAME:
+            return False, "cannot delete the Default group"
+        cur = conn.execute(
+            "SELECT COUNT(*) AS n FROM monitored_emails WHERE group_id = ?", (group_id,),
+        ).fetchone()
+        if cur["n"] > 0:
+            return False, f"group has {cur['n']} email(s); move them first"
+        conn.execute("DELETE FROM groups WHERE id = ?", (group_id,))
+        return True, ""
 
 
 # ── breaches & pastes ─────────────────────────────────────────────────────────
@@ -304,19 +453,26 @@ def email_paste_ids(email: str) -> set[str]:
             "SELECT paste_id FROM email_pastes WHERE email = ?", (email,))}
 
 
-def list_findings(limit: int = 200, only_new_since: Optional[str] = None) -> list[dict]:
+def list_findings(limit: int = 200, only_new_since: Optional[str] = None,
+                  group_id: Optional[int] = None) -> list[dict]:
     sql = """
         SELECT eb.email, eb.breach_name, eb.first_seen_at,
                b.title, b.domain, b.breach_date, b.pwn_count, b.data_classes,
                b.is_sensitive, b.is_verified, b.is_fabricated, b.is_spam_list,
-               b.is_retired, b.logo_path
+               b.is_retired, b.logo_path,
+               m.group_id, g.name AS group_name
         FROM email_breaches eb
         LEFT JOIN breaches b ON b.name = eb.breach_name
+        LEFT JOIN monitored_emails m ON m.email = eb.email
+        LEFT JOIN groups g ON g.id = m.group_id
     """
-    params: list = []
+    where, params = [], []
     if only_new_since:
-        sql += " WHERE eb.first_seen_at >= ?"
-        params.append(only_new_since)
+        where.append("eb.first_seen_at >= ?"); params.append(only_new_since)
+    if group_id is not None:
+        where.append("m.group_id = ?"); params.append(group_id)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY eb.first_seen_at DESC LIMIT ?"
     params.append(limit)
     with connect() as conn:
@@ -333,15 +489,21 @@ def list_findings(limit: int = 200, only_new_since: Optional[str] = None) -> lis
         return sev_mod.by_severity(out)
 
 
-def severity_counts() -> dict:
+def severity_counts(group_id: Optional[int] = None) -> dict:
     """Count email_breach links bucketed by computed severity level."""
+    sql = """
+        SELECT b.data_classes, b.is_sensitive, b.is_verified,
+               b.is_fabricated, b.is_spam_list, b.is_retired
+        FROM email_breaches eb
+        LEFT JOIN breaches b ON b.name = eb.breach_name
+        LEFT JOIN monitored_emails m ON m.email = eb.email
+    """
+    params: list = []
+    if group_id is not None:
+        sql += " WHERE m.group_id = ?"
+        params.append(group_id)
     with connect() as conn:
-        rows = conn.execute("""
-            SELECT b.data_classes, b.is_sensitive, b.is_verified,
-                   b.is_fabricated, b.is_spam_list, b.is_retired
-              FROM email_breaches eb
-              LEFT JOIN breaches b ON b.name = eb.breach_name
-        """).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
     for r in rows:
         try:
@@ -360,16 +522,24 @@ def severity_counts() -> dict:
     return counts
 
 
-def list_pastes(limit: int = 200) -> list[dict]:
+def list_pastes(limit: int = 200, group_id: Optional[int] = None) -> list[dict]:
+    sql = """
+        SELECT ep.email, ep.paste_id, ep.first_seen_at,
+               p.source, p.title, p.paste_date, p.email_count,
+               m.group_id, g.name AS group_name
+        FROM email_pastes ep
+        LEFT JOIN pastes p ON p.id = ep.paste_id
+        LEFT JOIN monitored_emails m ON m.email = ep.email
+        LEFT JOIN groups g ON g.id = m.group_id
+    """
+    params: list = []
+    if group_id is not None:
+        sql += " WHERE m.group_id = ?"
+        params.append(group_id)
+    sql += " ORDER BY ep.first_seen_at DESC LIMIT ?"
+    params.append(limit)
     with connect() as conn:
-        rows = conn.execute("""
-            SELECT ep.email, ep.paste_id, ep.first_seen_at,
-                   p.source, p.title, p.paste_date, p.email_count
-            FROM email_pastes ep
-            LEFT JOIN pastes p ON p.id = ep.paste_id
-            ORDER BY ep.first_seen_at DESC
-            LIMIT ?
-        """, (limit,)).fetchall()
+        rows = conn.execute(sql, params).fetchall()
         out = []
         for r in rows:
             d = dict(r)
@@ -416,13 +586,30 @@ def recent_runs(limit: int = 20) -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def dashboard_stats() -> dict:
+def dashboard_stats(group_id: Optional[int] = None) -> dict:
     with connect() as conn:
-        emails = conn.execute("SELECT COUNT(*) FROM monitored_emails").fetchone()[0]
-        breaches = conn.execute("SELECT COUNT(*) FROM email_breaches").fetchone()[0]
-        pastes = conn.execute("SELECT COUNT(*) FROM email_pastes").fetchone()[0]
-        unique_breaches = conn.execute(
-            "SELECT COUNT(DISTINCT breach_name) FROM email_breaches").fetchone()[0]
+        if group_id is None:
+            emails = conn.execute("SELECT COUNT(*) FROM monitored_emails").fetchone()[0]
+            breaches = conn.execute("SELECT COUNT(*) FROM email_breaches").fetchone()[0]
+            pastes = conn.execute("SELECT COUNT(*) FROM email_pastes").fetchone()[0]
+            unique_breaches = conn.execute(
+                "SELECT COUNT(DISTINCT breach_name) FROM email_breaches").fetchone()[0]
+        else:
+            emails = conn.execute(
+                "SELECT COUNT(*) FROM monitored_emails WHERE group_id = ?",
+                (group_id,)).fetchone()[0]
+            breaches = conn.execute("""
+                SELECT COUNT(*) FROM email_breaches eb
+                JOIN monitored_emails m ON m.email = eb.email
+                WHERE m.group_id = ?""", (group_id,)).fetchone()[0]
+            pastes = conn.execute("""
+                SELECT COUNT(*) FROM email_pastes ep
+                JOIN monitored_emails m ON m.email = ep.email
+                WHERE m.group_id = ?""", (group_id,)).fetchone()[0]
+            unique_breaches = conn.execute("""
+                SELECT COUNT(DISTINCT eb.breach_name) FROM email_breaches eb
+                JOIN monitored_emails m ON m.email = eb.email
+                WHERE m.group_id = ?""", (group_id,)).fetchone()[0]
         last_run = conn.execute(
             "SELECT * FROM scan_runs ORDER BY started_at DESC LIMIT 1").fetchone()
         return {

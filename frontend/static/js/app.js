@@ -81,6 +81,28 @@ function _severityBadge(sev) {
 
 const _SEV_RANK = { critical: 3, high: 2, medium: 1, low: 0 };
 
+// ── Group filter state ────────────────────────────────────────────────────────
+//
+// Selected group_id (number) or null for "All groups". Findings, pastes, and
+// dashboard stats all honour this. Scans triggered from the Groups tab use the
+// group on the row; scans from the dashboard use the global filter.
+
+let _activeGroupId = null;
+let _allGroups = [];
+
+function _qs(params) {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(params || {})) {
+    if (v !== null && v !== undefined && v !== '') p.set(k, v);
+  }
+  const s = p.toString();
+  return s ? `?${s}` : '';
+}
+
+function _groupParam() {
+  return _activeGroupId != null ? { group_id: _activeGroupId } : {};
+}
+
 // ── Tabs ───────────────────────────────────────────────────────────────────────
 
 function initNav() {
@@ -101,6 +123,7 @@ function initNav() {
     if (id === 'cfg-regen-btn')          btn.addEventListener('click', regenerateToken);
     if (id === 'upd-check-btn')          btn.addEventListener('click', checkForUpdates);
     if (id === 'upd-apply-btn')          btn.addEventListener('click', applyUpdate);
+    if (id === 'group-create-btn')       btn.addEventListener('click', createGroup);
     if (id === 'cfg-pw-save-btn')        btn.addEventListener('click', savePassword);
     if (id === 'cfg-pw-clear-btn')       btn.addEventListener('click', clearPassword);
     if (id === 'login-btn')              btn.addEventListener('click', login);
@@ -110,6 +133,11 @@ function initNav() {
   });
   $('login-token')?.addEventListener('keydown', e => {
     if (e.key === 'Enter') login();
+  });
+  $('group-filter')?.addEventListener('change', (e) => {
+    const v = e.target.value;
+    _activeGroupId = v ? parseInt(v, 10) : null;
+    refreshActiveTab();
   });
   // Show/hide password toggles for the login + set-password modals.
   _wireShowToggle('login-show', 'login-token');
@@ -132,8 +160,14 @@ function switchTab(name) {
   document.querySelectorAll('.view').forEach(v => {
     v.hidden = v.id !== ('view-' + name);
   });
+  refreshActiveTab();
+}
+
+function refreshActiveTab() {
+  const name = document.querySelector('.tab.active')?.dataset.tab;
   if (name === 'dashboard') loadDashboard();
   if (name === 'monitor')   loadEmails();
+  if (name === 'groups')    loadGroups();
   if (name === 'findings')  loadFindings('findings');
   if (name === 'pastes')    loadPastes();
   if (name === 'config')    { loadConfig(); refreshAuthState(); checkForUpdates(); }
@@ -247,7 +281,7 @@ function _setScanButtons(scanning) {
 
 async function loadDashboard() {
   try {
-    const r = await _apiFetch('/api/dashboard');
+    const r = await _apiFetch('/api/dashboard' + _qs(_groupParam()));
     const d = await r.json();
     $('stat-monitored').textContent = d.monitored_count;
     $('stat-breaches').textContent  = d.unique_breaches;
@@ -319,29 +353,70 @@ function _renderRunStatus(r) {
 
 async function loadEmails() {
   try {
-    const r = await _apiFetch('/api/emails');
+    await refreshGroupsCache();
+    const r = await _apiFetch('/api/emails' + _qs(_groupParam()));
     const d = await r.json();
     const tbody = document.querySelector('#monitor-table tbody');
     tbody.innerHTML = '';
     (d.emails || []).forEach(e => {
       const tr = document.createElement('tr');
+      const groupSelectId = `email-group-${btoa(e.email).replace(/[^a-z0-9]/gi,'')}`;
       tr.innerHTML =
         `<td>${_esc(e.email)}</td>` +
+        `<td>${_groupSelectHtml(groupSelectId, e.group_id)}</td>` +
         `<td>${_esc(_fmtDate(e.added_at))}</td>` +
         `<td>${e.breach_count}</td>` +
         `<td>${e.paste_count}</td>` +
         `<td>${_esc(_fmtDate(e.last_breach_at))}</td>` +
         `<td><button class="danger" data-rm="${_esc(e.email)}">Remove</button></td>`;
       tbody.appendChild(tr);
+      const sel = tr.querySelector(`#${groupSelectId}`);
+      if (sel) sel.addEventListener('change', () => moveEmailToGroup(e.email, sel.value));
     });
     tbody.querySelectorAll('button[data-rm]').forEach(b => {
       b.addEventListener('click', () => removeEmail(b.dataset.rm));
     });
     if (!tbody.children.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="muted">No emails yet — add some above.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="muted">No emails yet — add some above.</td></tr>';
     }
+    _refreshAddEmailGroupSelect();
   } catch (e) {
     console.warn('loadEmails:', e);
+  }
+}
+
+function _groupSelectHtml(id, currentGroupId) {
+  const opts = ['<option value="">(none)</option>']
+    .concat(_allGroups.map(g =>
+      `<option value="${g.id}"${g.id === currentGroupId ? ' selected' : ''}>${_esc(g.name)}</option>`));
+  return `<select id="${id}" class="inline-group-select">${opts.join('')}</select>`;
+}
+
+function _refreshAddEmailGroupSelect() {
+  const sel = $('add-emails-group');
+  if (!sel) return;
+  const previous = sel.value;
+  const defaultGroup = _allGroups.find(g => g.name === 'Default');
+  sel.innerHTML = _allGroups.map(g =>
+    `<option value="${g.id}">${_esc(g.name)}</option>`).join('');
+  if (previous && _allGroups.some(g => String(g.id) === previous)) {
+    sel.value = previous;
+  } else if (defaultGroup) {
+    sel.value = String(defaultGroup.id);
+  }
+}
+
+async function moveEmailToGroup(email, groupValue) {
+  const group_id = groupValue ? parseInt(groupValue, 10) : null;
+  try {
+    await _apiFetch(`/api/emails/${encodeURIComponent(email)}/group`, {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ group_id }),
+    });
+    loadEmails();
+    if (_activeGroupId !== null) loadDashboard();
+  } catch (e) {
+    alert('Error: ' + e.message);
   }
 }
 
@@ -352,11 +427,13 @@ async function addEmails() {
     _setStatus('monitor-add-status', 'Enter at least one email.', '#f85149');
     return;
   }
+  const groupVal = $('add-emails-group')?.value;
+  const group_id = groupVal ? parseInt(groupVal, 10) : null;
   try {
     _setStatus('monitor-add-status', 'Adding…', '');
     const r = await _apiFetch('/api/emails', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({emails}),
+      body: JSON.stringify({ emails, group_id }),
     });
     const d = await r.json();
     const parts = [`${(d.added||[]).length} added`];
@@ -386,7 +463,7 @@ async function removeEmail(email) {
 
 async function loadFindings(_caller) {
   try {
-    const r = await _apiFetch('/api/findings?limit=500');
+    const r = await _apiFetch('/api/findings' + _qs({ limit: 500, ..._groupParam() }));
     const d = await r.json();
     const tbody = document.querySelector('#findings-table tbody');
     tbody.innerHTML = '';
@@ -414,7 +491,7 @@ async function loadFindings(_caller) {
 
 async function loadPastes() {
   try {
-    const r = await _apiFetch('/api/pastes?limit=500');
+    const r = await _apiFetch('/api/pastes' + _qs({ limit: 500, ..._groupParam() }));
     const d = await r.json();
     const tbody = document.querySelector('#pastes-table tbody');
     tbody.innerHTML = '';
@@ -440,16 +517,23 @@ async function loadPastes() {
 
 // ── Scan actions ──────────────────────────────────────────────────────────────
 
-async function runScanNow() {
+async function runScanNow(opts = {}) {
   _setScanButtons(true);
   _setStatus('dash-scan-status', 'Starting scan…', '');
+  const body = { persist: true };
+  const gid = opts.group_id !== undefined ? opts.group_id : _activeGroupId;
+  if (gid != null) body.group_id = gid;
   try {
     const r = await _apiFetch('/api/scan', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ persist: true }),
+      body: JSON.stringify(body),
     });
     const d = await r.json();
-    _setStatus('dash-scan-status', `Scan started — ${d.email_count} email(s).`, '#58a6ff');
+    const scope = gid != null
+      ? ` in group "${_allGroups.find(g => g.id === gid)?.name || gid}"`
+      : '';
+    _setStatus('dash-scan-status',
+      `Scan started — ${d.email_count} email(s)${scope}.`, '#58a6ff');
   } catch (e) {
     _setStatus('dash-scan-status', 'Error: ' + e.message, '#f85149');
     _setScanButtons(false);
@@ -821,6 +905,122 @@ async function savePassword() {
   }
 }
 
+// ── Groups ────────────────────────────────────────────────────────────────────
+
+async function refreshGroupsCache() {
+  try {
+    const r = await _apiFetch('/api/groups');
+    const d = await r.json();
+    _allGroups = d.groups || [];
+    _refreshGroupFilterDropdown();
+  } catch (e) {
+    console.warn('refreshGroupsCache:', e);
+  }
+}
+
+function _refreshGroupFilterDropdown() {
+  const sel = $('group-filter');
+  if (!sel) return;
+  const previous = _activeGroupId;
+  sel.innerHTML = '<option value="">All groups</option>'
+    + _allGroups.map(g =>
+        `<option value="${g.id}">${_esc(g.name)} (${g.email_count})</option>`).join('');
+  if (previous != null && _allGroups.some(g => g.id === previous)) {
+    sel.value = String(previous);
+  }
+}
+
+async function loadGroups() {
+  try {
+    await refreshGroupsCache();
+    const tbody = document.querySelector('#groups-table tbody');
+    tbody.innerHTML = '';
+    _allGroups.forEach(g => {
+      const tr = document.createElement('tr');
+      const isDefault = g.name === 'Default';
+      tr.innerHTML =
+        `<td><input type="text" class="group-name" data-id="${g.id}" value="${_esc(g.name)}" ${isDefault ? 'readonly' : ''}></td>` +
+        `<td><input type="text" class="group-desc" data-id="${g.id}" value="${_esc(g.description || '')}"></td>` +
+        `<td>${g.email_count}</td>` +
+        `<td>${_esc(_fmtDate(g.created_at))}</td>` +
+        `<td><button data-scan="${g.id}">🕵️ Scan</button></td>` +
+        `<td>` +
+          `<button data-save="${g.id}">Save</button> ` +
+          `${isDefault ? '' : `<button class="danger" data-del="${g.id}">Delete</button>`}` +
+        `</td>`;
+      tbody.appendChild(tr);
+    });
+    if (!tbody.children.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="muted">No groups yet — create one above.</td></tr>';
+    }
+    tbody.querySelectorAll('button[data-save]').forEach(b => {
+      b.addEventListener('click', () => saveGroupRow(parseInt(b.dataset.save, 10)));
+    });
+    tbody.querySelectorAll('button[data-del]').forEach(b => {
+      b.addEventListener('click', () => deleteGroupRow(parseInt(b.dataset.del, 10)));
+    });
+    tbody.querySelectorAll('button[data-scan]').forEach(b => {
+      b.addEventListener('click', () => runScanNow({ group_id: parseInt(b.dataset.scan, 10) }));
+    });
+  } catch (e) {
+    console.warn('loadGroups:', e);
+  }
+}
+
+async function createGroup() {
+  const name = ($('group-create-name').value || '').trim();
+  const desc = ($('group-create-desc').value || '').trim();
+  if (!name) {
+    _setStatus('group-create-status', 'Name is required.', '#f85149');
+    return;
+  }
+  try {
+    _setStatus('group-create-status', 'Creating…', '');
+    await _apiFetch('/api/groups', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ name, description: desc }),
+    });
+    $('group-create-name').value = '';
+    $('group-create-desc').value = '';
+    _setStatus('group-create-status', 'Created.', '#3fb950');
+    setTimeout(() => _setStatus('group-create-status', '', ''), 3000);
+    loadGroups();
+  } catch (e) {
+    _setStatus('group-create-status', 'Error: ' + e.message, '#f85149');
+  }
+}
+
+async function saveGroupRow(group_id) {
+  const nameInput = document.querySelector(`.group-name[data-id="${group_id}"]`);
+  const descInput = document.querySelector(`.group-desc[data-id="${group_id}"]`);
+  const body = {};
+  if (nameInput && !nameInput.readOnly) body.name = nameInput.value.trim();
+  if (descInput) body.description = descInput.value.trim();
+  try {
+    await _apiFetch(`/api/groups/${group_id}`, {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    loadGroups();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+async function deleteGroupRow(group_id) {
+  if (!confirm('Delete this group? It must be empty (move emails out first).')) return;
+  try {
+    await _apiFetch(`/api/groups/${group_id}`, { method: 'DELETE' });
+    if (_activeGroupId === group_id) {
+      _activeGroupId = null;
+      $('group-filter').value = '';
+    }
+    loadGroups();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
 // ── Updates ───────────────────────────────────────────────────────────────────
 
 function _renderUpdateState(d) {
@@ -908,6 +1108,7 @@ async function clearPassword() {
 
 async function bootApp() {
   connectWebSocket();
+  await refreshGroupsCache();
   loadDashboard();
   loadEmails();
   loadConfig();

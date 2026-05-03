@@ -54,11 +54,18 @@
     <nav class="tabs" id="tabs">
       <button class="tab active" data-tab="dashboard">Dashboard</button>
       <button class="tab" data-tab="monitor">Monitored</button>
+      <button class="tab" data-tab="groups">Groups</button>
       <button class="tab" data-tab="findings">Findings</button>
       <button class="tab" data-tab="pastes">Pastes</button>
       <button class="tab" data-tab="report">One-shot report</button>
       <button class="tab" data-tab="config">Config</button>
     </nav>
+    <label class="group-filter muted small" title="Filter dashboard, findings, and pastes by group">
+      Group
+      <select id="group-filter">
+        <option value="">All groups</option>
+      </select>
+    </label>
     <button id="logout-btn" class="logout" title="Sign out">⎋</button>
     <div class="ws-status" id="ws-status" title="WebSocket status">●</div>
   </header>
@@ -112,6 +119,11 @@
         <h3>Add emails</h3>
         <p class="muted small">Paste one or more addresses (commas, spaces, or newlines work).</p>
         <textarea id="add-emails-input" rows="4" placeholder="alice@example.com, bob@example.com"></textarea>
+        <div class="form-row">
+          <label>Add to group<br>
+            <select id="add-emails-group"></select>
+          </label>
+        </div>
         <div class="actions">
           <button id="add-emails-btn" class="primary">Add</button>
           <button id="monitor-scan-btn">🕵️ Scan All Now</button>
@@ -121,7 +133,34 @@
       <div class="card">
         <h3>Monitored emails</h3>
         <table class="table" id="monitor-table">
-          <thead><tr><th>Email</th><th>Added</th><th>Breaches</th><th>Pastes</th><th>Last seen</th><th></th></tr></thead>
+          <thead><tr><th>Email</th><th>Group</th><th>Added</th><th>Breaches</th><th>Pastes</th><th>Last seen</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Groups ─────────────────────────────────────────────────────────────── -->
+    <section class="view" id="view-groups" hidden>
+      <div class="card">
+        <h3>Create group</h3>
+        <p class="muted small">
+          Groups segment monitored emails — useful for separating personal vs.
+          work, or one group per MSP client. Each email belongs to exactly one
+          group; an auto-created <b>Default</b> group catches new addresses.
+        </p>
+        <div class="form-grid">
+          <label>Name<br><input type="text" id="group-create-name" placeholder="e.g. Acme Corp"></label>
+          <label>Description (optional)<br><input type="text" id="group-create-desc"></label>
+        </div>
+        <div class="actions">
+          <button id="group-create-btn" class="primary">Create</button>
+          <span id="group-create-status" class="status"></span>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Groups</h3>
+        <table class="table" id="groups-table">
+          <thead><tr><th>Name</th><th>Description</th><th>Emails</th><th>Created</th><th>Scan</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
