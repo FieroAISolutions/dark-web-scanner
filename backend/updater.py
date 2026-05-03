@@ -7,7 +7,10 @@ In-app updater. Two modes:
     queries the GitHub REST API for the upstream branch tip and overlays the
     repo tarball onto the working tree. The currently-installed commit SHA is
     persisted to data/installed_sha.txt so subsequent checks know whether an
-    update is available.
+    update is available. Within the source dirs in `_PRUNABLE_DIRS`, files
+    that exist locally but not upstream are removed (so deletions propagate);
+    everything else is overlay-only. Each apply takes a snapshot of the files
+    it is about to touch into data/.update_backup/ and rolls back on failure.
 
 Operator intent: a one-click 'pull latest' from the Config tab so MSP
 operators don't need terminal access (or even git installed) to update. We
@@ -27,6 +30,8 @@ import os
 import shutil
 import subprocess
 import tarfile
+import tempfile
+import time
 from pathlib import Path
 
 import httpx
@@ -35,14 +40,22 @@ ROOT = Path(__file__).resolve().parent.parent
 
 log = logging.getLogger("dws.updater")
 
-# Upstream repo for tarball-mode updates. Hard-coded because by definition the
-# tarball install has no `git remote` to read from.
-UPSTREAM_OWNER = "enfierno21"
-UPSTREAM_REPO = "DarkWebScanner"
-DEFAULT_BRANCH = "main"
+# Upstream repo for tarball-mode updates. Hard-coded by default because the
+# tarball install has no `git remote` to read from; env vars let forks rebrand
+# without code changes.
+UPSTREAM_OWNER = os.environ.get("DWS_UPSTREAM_OWNER", "enfierno21")
+UPSTREAM_REPO = os.environ.get("DWS_UPSTREAM_REPO", "DarkWebScanner")
+DEFAULT_BRANCH = os.environ.get("DWS_UPSTREAM_BRANCH", "main")
 USER_AGENT = "DarkWebScanner-Updater"
 
 INSTALLED_SHA_FILE = ROOT / "data" / "installed_sha.txt"
+BACKUP_DIR = ROOT / "data" / ".update_backup"
+
+# Within these top-level directories, files present locally but missing
+# upstream are removed during apply so upstream deletions propagate. Outside
+# these dirs we overlay only — never remove — to keep operator-managed files
+# (custom scripts, README edits, etc.) intact.
+_PRUNABLE_DIRS = ("backend", "frontend", "tests")
 
 # Paths the tarball-mode extractor must never touch — operator data, virtual
 # envs, build caches. Matched as path-prefixes (forward slashes, relative to
@@ -55,6 +68,14 @@ _PRESERVE_PREFIXES = (
     ".git/",
 )
 _PRESERVE_GLOBS = ("*.db", "*.db-wal", "*.db-shm", "*.pyc", "*.pyo", ".DS_Store")
+
+# Cache for the upstream commit lookup. GitHub's anonymous REST limit is
+# 60 req/hour/IP; the Config tab fires a status check on every navigation.
+_LATEST_CACHE_TTL = 60.0
+_latest_cache: dict = {"ts": 0.0, "branch": None, "value": None}
+
+# Serialize concurrent apply attempts so a double-click can't half-apply.
+_apply_lock = asyncio.Lock()
 
 
 def _git_available() -> bool:
@@ -81,6 +102,14 @@ def _is_repo_sync() -> bool:
         return rc == 0
     except Exception:
         return False
+
+
+def _short_err(e: Exception) -> str:
+    """Trim verbose exception strings (httpx in particular) for UI display."""
+    cls = e.__class__.__name__
+    msg = (str(e) or "").split("\n", 1)[0].strip()
+    out = f"{cls}: {msg}" if msg else cls
+    return out[:200]
 
 
 # ── git mode ─────────────────────────────────────────────────────────────────
@@ -193,6 +222,18 @@ async def _fetch_latest_commit(branch: str) -> dict:
     return {"sha": sha, "short": sha[:7], "subject": msg.splitlines()[0] if msg else ""}
 
 
+async def _fetch_latest_commit_cached(branch: str, *, force: bool) -> dict:
+    now = time.monotonic()
+    cached = _latest_cache
+    if (not force and cached["value"] is not None
+            and cached["branch"] == branch
+            and now - cached["ts"] < _LATEST_CACHE_TTL):
+        return cached["value"]
+    value = await _fetch_latest_commit(branch)
+    _latest_cache.update({"ts": now, "branch": branch, "value": value})
+    return value
+
+
 async def _download_tarball(sha: str) -> bytes:
     url = f"https://codeload.github.com/{UPSTREAM_OWNER}/{UPSTREAM_REPO}/tar.gz/{sha}"
     async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
@@ -202,8 +243,8 @@ async def _download_tarball(sha: str) -> bytes:
 
 
 def _is_preserved(rel_path: str) -> bool:
-    """True if this relative path (forward slashes, no leading ./) must NOT
-    be touched by the tarball overlay — operator data, venvs, caches."""
+    """True if this relative path (forward slashes) must NOT be touched by the
+    tarball overlay — operator data, venvs, caches."""
     norm = rel_path.replace("\\", "/")
     if norm.startswith("./"):
         norm = norm[2:]
@@ -214,29 +255,53 @@ def _is_preserved(rel_path: str) -> bool:
     return any(fnmatch.fnmatch(name, pat) for pat in _PRESERVE_GLOBS)
 
 
-def _extract_tarball_over_root(data: bytes) -> int:
-    """Overlay the tarball at `data` onto ROOT. Skips preserved paths and
-    refuses any entry that would write outside ROOT. Returns count of files
-    written."""
-    written = 0
-    root_resolved = ROOT.resolve()
+def _in_prunable_dir(rel_path: str) -> bool:
+    return any(rel_path == d or rel_path.startswith(d + "/") for d in _PRUNABLE_DIRS)
+
+
+def _walk_files(root: Path, *, only_prunable: bool) -> set[str]:
+    """All non-preserved files under `root` as relative POSIX paths.
+    If only_prunable, restrict to `_PRUNABLE_DIRS` subtrees."""
+    out: set[str] = set()
+    if only_prunable:
+        roots = [root / d for d in _PRUNABLE_DIRS if (root / d).is_dir()]
+    else:
+        roots = [root]
+    for base in roots:
+        for path in base.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                rel = path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if _is_preserved(rel):
+                continue
+            out.add(rel)
+    return out
+
+
+def _extract_tarball_to_staging(data: bytes, dest: Path, expected_sha: str) -> Path:
+    """Extract the tarball into `dest`. Validates that the top-level dir name
+    contains the expected short SHA. Returns the path of the top-level dir."""
+    dest.mkdir(parents=True, exist_ok=True)
+    dest_resolved = dest.resolve()
+    top_name: str | None = None
+    short = expected_sha[:7] if expected_sha else ""
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
         members = tf.getmembers()
         if not members:
             raise RuntimeError("empty tarball")
-        # GitHub tarballs wrap everything in a single top-level dir.
-        top = members[0].name.split("/", 1)[0]
-        prefix = top + "/"
+        top_name = members[0].name.split("/", 1)[0]
+        if short and short not in top_name:
+            raise RuntimeError(
+                f"tarball top dir {top_name!r} does not contain expected sha {short}"
+            )
         for m in members:
-            if not m.name.startswith(prefix):
-                continue
-            rel = m.name[len(prefix):]
-            if not rel or _is_preserved(rel):
-                continue
-            target = ROOT / rel
+            target = dest / m.name
             try:
                 target_resolved = target.resolve()
-                target_resolved.relative_to(root_resolved)
+                target_resolved.relative_to(dest_resolved)
             except (ValueError, OSError):
                 continue  # path traversal guard
             if m.isdir():
@@ -252,12 +317,75 @@ def _extract_tarball_over_root(data: bytes) -> int:
                     os.chmod(target, m.mode & 0o777)
                 except OSError:
                     pass
-                written += 1
-            # symlinks and other types are intentionally skipped
-    return written
+    assert top_name is not None
+    return dest / top_name
 
 
-async def _tarball_status() -> dict:
+def _snapshot_paths(paths: set[str], src_root: Path, snapshot_dir: Path) -> None:
+    """Copy `paths` from src_root to snapshot_dir, preserving structure."""
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    for rel in paths:
+        src = src_root / rel
+        if not src.is_file():
+            continue
+        dst = snapshot_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+
+
+def _restore_snapshot(snapshot_dir: Path, dest_root: Path) -> int:
+    """Restore every file from snapshot_dir back into dest_root. Best-effort:
+    individual copy failures are logged and skipped. Returns count restored."""
+    if not snapshot_dir.is_dir():
+        return 0
+    restored = 0
+    for src in snapshot_dir.rglob("*"):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(snapshot_dir)
+        dst = dest_root / rel
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            restored += 1
+        except OSError as e:
+            log.warning("restore: failed to write %s: %s", rel, e)
+    return restored
+
+
+def _apply_overlay_and_prune(
+    extracted_root: Path,
+    dest_root: Path,
+    tarball_files: set[str],
+    to_remove: set[str],
+) -> tuple[int, int]:
+    """Copy upstream files over the working tree, then prune removed ones.
+    Returns (copied, removed). Raises on overlay copy failure so the caller
+    can roll back; pruning failures are best-effort and logged."""
+    copied = 0
+    for rel in tarball_files:
+        src = extracted_root / rel
+        if not src.is_file():
+            continue
+        dst = dest_root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        copied += 1
+
+    removed = 0
+    for rel in to_remove:
+        target = dest_root / rel
+        try:
+            target.unlink()
+            removed += 1
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            log.warning("prune: could not remove %s: %s", rel, e)
+    return copied, removed
+
+
+async def _tarball_status(*, force_refresh: bool) -> dict:
     branch = DEFAULT_BRANCH
     installed = _read_installed_sha()
 
@@ -274,21 +402,24 @@ async def _tarball_status() -> dict:
     }
 
     try:
-        latest = await _fetch_latest_commit(branch)
+        latest = await _fetch_latest_commit_cached(branch, force=force_refresh)
     except Exception as e:
+        log.warning("updater: github api failed: %s", _short_err(e))
         return {**base, "upstream_sha": None, "behind": 0, "fetched": False,
-                "fetch_error": f"github api: {e}", "update_available": False}
+                "fetch_error": _short_err(e), "update_available": False}
 
-    # First run after upgrading to the tarball-aware updater: we don't yet know
-    # what's installed, so offer the apply to pin the SHA file.
     if installed is None:
+        # First run after upgrading to the tarball-aware updater: we don't yet
+        # know what's installed, so offer the apply to pin the SHA file.
         update_available = True
+        head_subject: str | None = "(installed commit unknown — apply to pin)"
     else:
         update_available = installed != latest["sha"]
+        head_subject = None
 
     return {
         **base,
-        "head_subject": None if installed else "(installed commit unknown — apply to pin)",
+        "head_subject": head_subject,
         "upstream_sha": latest["short"],
         "upstream_subject": latest["subject"],
         "behind": 1 if update_available else 0,
@@ -299,45 +430,88 @@ async def _tarball_status() -> dict:
 
 
 async def _tarball_apply() -> dict:
+    if _apply_lock.locked():
+        return {"ok": False, "error": "an update is already in progress"}
+    async with _apply_lock:
+        return await _tarball_apply_locked()
+
+
+async def _tarball_apply_locked() -> dict:
     branch = DEFAULT_BRANCH
     installed = _read_installed_sha()
     before_short = installed[:7] if installed else "unknown"
 
     try:
-        latest = await _fetch_latest_commit(branch)
+        # Always force-refresh on apply: never act on stale comparison data.
+        latest = await _fetch_latest_commit_cached(branch, force=True)
     except Exception as e:
-        return {"ok": False, "error": f"github api: {e}"}
+        log.warning("updater: github api failed: %s", _short_err(e))
+        return {"ok": False, "error": f"github api: {_short_err(e)}"}
 
     if installed and installed == latest["sha"]:
         return {"ok": False, "error": "already at latest commit"}
 
+    log.info("updater: applying %s -> %s", before_short, latest["short"])
+
     try:
         data = await _download_tarball(latest["sha"])
     except Exception as e:
-        return {"ok": False, "error": f"download failed: {e}"}
+        log.warning("updater: download failed: %s", _short_err(e))
+        return {"ok": False, "error": f"download failed: {_short_err(e)}"}
+
+    def _do_apply() -> tuple[int, int]:
+        with tempfile.TemporaryDirectory(prefix="dws-update-") as staging:
+            extract_dir = Path(staging) / "extract"
+            extracted_root = _extract_tarball_to_staging(data, extract_dir, latest["sha"])
+
+            tarball_files = _walk_files(extracted_root, only_prunable=False)
+            local_in_prunable = _walk_files(ROOT, only_prunable=True)
+            tarball_in_prunable = {f for f in tarball_files if _in_prunable_dir(f)}
+            to_remove = local_in_prunable - tarball_in_prunable
+
+            # Snapshot every file we are about to touch so we can roll back.
+            files_to_overwrite = {f for f in tarball_files if (ROOT / f).is_file()}
+            to_snapshot = files_to_overwrite | to_remove
+
+            shutil.rmtree(BACKUP_DIR, ignore_errors=True)
+            _snapshot_paths(to_snapshot, ROOT, BACKUP_DIR)
+
+            try:
+                return _apply_overlay_and_prune(
+                    extracted_root, ROOT, tarball_files, to_remove,
+                )
+            except Exception:
+                restored = _restore_snapshot(BACKUP_DIR, ROOT)
+                log.warning("updater: rolled back %d files after apply failure", restored)
+                raise
 
     try:
-        await asyncio.to_thread(_extract_tarball_over_root, data)
+        copied, removed = await asyncio.to_thread(_do_apply)
     except Exception as e:
-        return {"ok": False, "error": f"extract failed: {e}"}
+        log.exception("updater: apply failed")
+        return {"ok": False, "error": f"apply failed (rolled back): {_short_err(e)}"}
 
     _write_installed_sha(latest["sha"])
+    log.info("updater: applied %s -> %s (%d files written, %d removed)",
+             before_short, latest["short"], copied, removed)
 
     return {
         "ok": True,
         "before_sha": before_short,
         "after_sha": latest["short"],
         "summary": [f"{latest['short']} {latest['subject']}".rstrip()],
+        "files_changed": copied,
+        "files_removed": removed,
         "restart_needed": True,
     }
 
 
 # ── public API ───────────────────────────────────────────────────────────────
 
-async def status() -> dict:
+async def status(*, force_refresh: bool = False) -> dict:
     if await asyncio.to_thread(_is_repo_sync):
         return await _git_status()
-    return await _tarball_status()
+    return await _tarball_status(force_refresh=force_refresh)
 
 
 async def apply_update() -> dict:

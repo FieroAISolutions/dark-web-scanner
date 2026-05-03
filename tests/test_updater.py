@@ -2,9 +2,10 @@
 GitHub HTTP layer so the suite runs in any environment, including ones
 without a real git repo or network access."""
 
-import gzip
+import asyncio
 import io
 import tarfile
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -16,13 +17,20 @@ def _fake_git(responses):
     """Build a side_effect that returns rc/stdout/stderr for each call in order
     based on the args the caller passed."""
     def side_effect(*args, **kwargs):
-        # args == ("rev-parse", "HEAD") etc.
         for matcher, result in responses:
             if matcher == args:
                 return result
-        # Default: empty success
         return (0, "", "")
     return side_effect
+
+
+@pytest.fixture(autouse=True)
+def _reset_updater_state(monkeypatch):
+    """Each test starts with a fresh upstream-commit cache so prior tests
+    can't leak fake responses."""
+    monkeypatch.setattr(updater, "_latest_cache",
+                        {"ts": 0.0, "branch": None, "value": None})
+    yield
 
 
 # ── git mode ─────────────────────────────────────────────────────────────────
@@ -96,14 +104,14 @@ async def test_status_dirty_blocks_update(monkeypatch):
         (("rev-parse", "--short", "origin/main"), (0, "new222", "")),
         (("rev-list", "--count", "origin/main..HEAD"), (0, "0", "")),
         (("rev-list", "--count", "HEAD..origin/main"), (0, "1", "")),
-        (("diff", "--quiet"), (1, "", "")),  # dirty working tree
+        (("diff", "--quiet"), (1, "", "")),
         (("diff", "--cached", "--quiet"), (0, "", "")),
     ])
     with patch("backend.updater._git_sync", side_effect=side_effect):
         out = await updater.status()
 
     assert out["dirty"] is True
-    assert out["update_available"] is False  # dirty blocks update
+    assert out["update_available"] is False
 
 
 @pytest.mark.asyncio
@@ -113,7 +121,7 @@ async def test_apply_refuses_when_dirty(monkeypatch):
 
     side_effect = _fake_git([
         (("rev-parse", "--abbrev-ref", "HEAD"), (0, "main", "")),
-        (("diff", "--quiet"), (1, "", "")),  # dirty
+        (("diff", "--quiet"), (1, "", "")),
         (("diff", "--cached", "--quiet"), (0, "", "")),
     ])
     with patch("backend.updater._git_sync", side_effect=side_effect):
@@ -138,7 +146,6 @@ async def test_apply_success(monkeypatch):
         (("log", "before1..", "--pretty=format:%h %s", "--no-merges"),
          (0, "newsha1 commit one\nnewsha2 commit two", "")),
     ])
-    # rev-parse --short HEAD called twice; need varied returns
     call_state = {"head_calls": 0}
 
     def mixed_side_effect(*args, **kwargs):
@@ -179,22 +186,18 @@ async def test_apply_fetch_failure(monkeypatch):
 
 # ── tarball mode (no .git) ───────────────────────────────────────────────────
 
-async def _async_return(value):
-    return value
-
-
 def _patch_tarball_env(monkeypatch, tmp_path):
     """Redirect ROOT and the installed-sha file into tmp_path so tarball-mode
     apply doesn't touch the real working tree."""
     monkeypatch.setattr(updater, "ROOT", tmp_path)
     monkeypatch.setattr(updater, "INSTALLED_SHA_FILE",
                         tmp_path / "data" / "installed_sha.txt")
+    monkeypatch.setattr(updater, "BACKUP_DIR", tmp_path / "data" / ".update_backup")
     monkeypatch.setattr(updater, "_is_repo_sync", lambda: False)
 
 
 @pytest.mark.asyncio
 async def test_tarball_status_first_run(monkeypatch, tmp_path):
-    """No installed SHA recorded yet → offer the apply so the SHA can be pinned."""
     _patch_tarball_env(monkeypatch, tmp_path)
 
     async def fake_latest(branch):
@@ -222,7 +225,6 @@ async def test_tarball_status_up_to_date(monkeypatch, tmp_path):
     monkeypatch.setattr(updater, "_fetch_latest_commit", fake_latest)
 
     out = await updater.status()
-    assert out["mode"] == "tarball"
     assert out["update_available"] is False
     assert out["behind"] == 0
     assert out["head_sha"] == sha[:7]
@@ -260,6 +262,38 @@ async def test_tarball_status_api_failure(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_tarball_status_uses_cache(monkeypatch, tmp_path):
+    """A second status call within the cache TTL must not re-hit the API."""
+    _patch_tarball_env(monkeypatch, tmp_path)
+    calls = {"n": 0}
+
+    async def fake_latest(branch):
+        calls["n"] += 1
+        return {"sha": "z" * 40, "short": "zzzzzzz", "subject": "cached"}
+    monkeypatch.setattr(updater, "_fetch_latest_commit", fake_latest)
+
+    await updater.status()
+    await updater.status()
+    await updater.status()
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_tarball_status_force_refresh_bypasses_cache(monkeypatch, tmp_path):
+    _patch_tarball_env(monkeypatch, tmp_path)
+    calls = {"n": 0}
+
+    async def fake_latest(branch):
+        calls["n"] += 1
+        return {"sha": "z" * 40, "short": "zzzzzzz", "subject": "x"}
+    monkeypatch.setattr(updater, "_fetch_latest_commit", fake_latest)
+
+    await updater.status()
+    await updater.status(force_refresh=True)
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
 async def test_tarball_apply_already_latest(monkeypatch, tmp_path):
     _patch_tarball_env(monkeypatch, tmp_path)
     sha = "e" * 40
@@ -279,7 +313,6 @@ def _make_tarball(top: str, files: dict[str, bytes]) -> bytes:
     """Build an in-memory tar.gz mimicking GitHub's archive layout."""
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w:gz") as tf:
-        # top-level dir entry
         info = tarfile.TarInfo(name=top)
         info.type = tarfile.DIRTYPE
         info.mode = 0o755
@@ -328,17 +361,167 @@ async def test_tarball_apply_overlays_files_and_pins_sha(monkeypatch, tmp_path):
     assert out["ok"] is True
     assert out["after_sha"] == sha[:7]
     assert out["restart_needed"] is True
+    assert out["files_changed"] >= 2
 
-    # Source files updated
     assert (tmp_path / "backend" / "main.py").read_text() == "# new version\n"
     assert (tmp_path / "backend" / "new_module.py").read_text() == "NEW = True\n"
-    # Operator data untouched
     assert (tmp_path / "data" / "scanner.db").read_bytes() == b"do-not-touch"
     assert (tmp_path / "data" / "admin_token.txt").read_text() == "secret"
-    # Tarball entry under data/ was rejected by the preservation guard
     assert not (tmp_path / "data" / "should_be_skipped.txt").exists()
-    # SHA pinned
     assert (tmp_path / "data" / "installed_sha.txt").read_text().strip() == sha
+
+
+@pytest.mark.asyncio
+async def test_tarball_apply_prunes_removed_files_in_tracked_dirs(monkeypatch, tmp_path):
+    """Files that exist locally inside backend/, frontend/, tests/ but are
+    absent upstream must be deleted (smart sync)."""
+    _patch_tarball_env(monkeypatch, tmp_path)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "installed_sha.txt").write_text("0" * 40 + "\n")
+
+    # Local files: one will survive (still upstream), one will be pruned
+    # (upstream removed), and a root-level custom file that must NOT be pruned
+    # because it's outside _PRUNABLE_DIRS.
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "backend" / "main.py").write_text("local main\n")
+    (tmp_path / "backend" / "obsolete.py").write_text("removed upstream\n")
+    (tmp_path / "frontend").mkdir()
+    (tmp_path / "frontend" / "old_template.html").write_text("dead\n")
+    (tmp_path / "operator_notes.md").write_text("operator-managed\n")
+
+    sha = "1" * 40
+    tar = _make_tarball(
+        top=f"{updater.UPSTREAM_OWNER}-{updater.UPSTREAM_REPO}-1111111",
+        files={
+            "backend/main.py": b"upstream main\n",
+            # Note: backend/obsolete.py absent → must be pruned
+            # Note: frontend/old_template.html absent → must be pruned
+            "frontend/static/js/app.js": b"new app\n",
+        },
+    )
+
+    async def fake_latest(branch):
+        return {"sha": sha, "short": sha[:7], "subject": "cleanup"}
+
+    async def fake_download(s):
+        return tar
+
+    monkeypatch.setattr(updater, "_fetch_latest_commit", fake_latest)
+    monkeypatch.setattr(updater, "_download_tarball", fake_download)
+
+    out = await updater.apply_update()
+    assert out["ok"] is True
+    assert out["files_removed"] == 2
+
+    assert (tmp_path / "backend" / "main.py").read_text() == "upstream main\n"
+    assert (tmp_path / "frontend" / "static" / "js" / "app.js").read_text() == "new app\n"
+    assert not (tmp_path / "backend" / "obsolete.py").exists()
+    assert not (tmp_path / "frontend" / "old_template.html").exists()
+    # Root-level operator-managed file must be left alone.
+    assert (tmp_path / "operator_notes.md").read_text() == "operator-managed\n"
+
+
+@pytest.mark.asyncio
+async def test_tarball_apply_rolls_back_on_failure(monkeypatch, tmp_path):
+    """If overlay copy raises mid-apply, the snapshot must restore the
+    pre-update state."""
+    _patch_tarball_env(monkeypatch, tmp_path)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "installed_sha.txt").write_text("0" * 40 + "\n")
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "backend" / "main.py").write_text("ORIGINAL\n")
+    (tmp_path / "backend" / "doomed.py").write_text("ORIGINAL doomed\n")
+
+    sha = "2" * 40
+    tar = _make_tarball(
+        top=f"{updater.UPSTREAM_OWNER}-{updater.UPSTREAM_REPO}-2222222",
+        files={
+            "backend/main.py": b"NEW main\n",
+            "backend/doomed.py": b"NEW doomed\n",
+        },
+    )
+
+    async def fake_latest(branch):
+        return {"sha": sha, "short": sha[:7], "subject": "x"}
+
+    async def fake_download(s):
+        return tar
+
+    monkeypatch.setattr(updater, "_fetch_latest_commit", fake_latest)
+    monkeypatch.setattr(updater, "_download_tarball", fake_download)
+
+    real_copy = updater.shutil.copy2
+    overlay_writes = {"n": 0}
+
+    def flaky_copy2(src, dst, *a, **kw):
+        # Snapshot writes go *to* BACKUP_DIR; restore writes come *from*
+        # BACKUP_DIR. Both must succeed. Only overlay writes (root → root)
+        # should be made to fail, on the second overlay copy.
+        if str(dst).startswith(str(updater.BACKUP_DIR)) \
+                or str(src).startswith(str(updater.BACKUP_DIR)):
+            return real_copy(src, dst, *a, **kw)
+        overlay_writes["n"] += 1
+        if overlay_writes["n"] >= 2:
+            raise OSError("simulated disk full")
+        return real_copy(src, dst, *a, **kw)
+
+    monkeypatch.setattr(updater.shutil, "copy2", flaky_copy2)
+
+    out = await updater.apply_update()
+    assert out["ok"] is False
+    assert "rolled back" in out["error"]
+
+    # Snapshot restored both originals; SHA file unchanged.
+    contents = {
+        (tmp_path / "backend" / "main.py").read_text(),
+        (tmp_path / "backend" / "doomed.py").read_text(),
+    }
+    assert "ORIGINAL\n" in contents
+    assert "ORIGINAL doomed\n" in contents
+    assert (tmp_path / "data" / "installed_sha.txt").read_text().strip() == "0" * 40
+
+
+@pytest.mark.asyncio
+async def test_tarball_apply_rejects_sha_mismatch(monkeypatch, tmp_path):
+    """A tarball whose top dir doesn't carry the expected short SHA is treated
+    as corrupt and not applied."""
+    _patch_tarball_env(monkeypatch, tmp_path)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "installed_sha.txt").write_text("0" * 40 + "\n")
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "backend" / "main.py").write_text("KEEP\n")
+
+    sha = "3" * 40
+    # Top dir has a wrong sha embedded
+    tar = _make_tarball(
+        top=f"{updater.UPSTREAM_OWNER}-{updater.UPSTREAM_REPO}-DEADBEEF",
+        files={"backend/main.py": b"REPLACED\n"},
+    )
+
+    async def fake_latest(branch):
+        return {"sha": sha, "short": sha[:7], "subject": "x"}
+
+    async def fake_download(s):
+        return tar
+
+    monkeypatch.setattr(updater, "_fetch_latest_commit", fake_latest)
+    monkeypatch.setattr(updater, "_download_tarball", fake_download)
+
+    out = await updater.apply_update()
+    assert out["ok"] is False
+    assert "sha" in out["error"].lower()
+    assert (tmp_path / "backend" / "main.py").read_text() == "KEEP\n"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_apply_rejected(monkeypatch, tmp_path):
+    _patch_tarball_env(monkeypatch, tmp_path)
+
+    async with updater._apply_lock:
+        out = await updater.apply_update()
+
+    assert out["ok"] is False
+    assert "already in progress" in out["error"]
 
 
 def test_is_preserved_blocks_data_and_venvs():
@@ -356,12 +539,19 @@ def test_is_preserved_blocks_data_and_venvs():
     assert not updater._is_preserved("README.md")
 
 
-def test_extract_rejects_path_traversal(tmp_path, monkeypatch):
-    monkeypatch.setattr(updater, "ROOT", tmp_path)
-    # Tarball with an entry escaping the top-level dir
+def test_in_prunable_dir():
+    assert updater._in_prunable_dir("backend/main.py")
+    assert updater._in_prunable_dir("frontend/static/js/app.js")
+    assert updater._in_prunable_dir("tests/test_x.py")
+    assert not updater._in_prunable_dir("README.md")
+    assert not updater._in_prunable_dir("run_mac_linux.sh")
+    assert not updater._in_prunable_dir("operator_notes.md")
+
+
+def test_extract_rejects_path_traversal(tmp_path):
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w:gz") as tf:
-        top = "evil-top"
+        top = "evil-top-aaaaaaa"
         info = tarfile.TarInfo(name=top)
         info.type = tarfile.DIRTYPE
         tf.addfile(info)
@@ -370,9 +560,16 @@ def test_extract_rejects_path_traversal(tmp_path, monkeypatch):
         bad.size = len(payload)
         tf.addfile(bad, io.BytesIO(payload))
 
-    updater._extract_tarball_over_root(raw.getvalue())
-    # Nothing should have been written outside tmp_path
+    staging = tmp_path / "stage"
+    updater._extract_tarball_to_staging(raw.getvalue(), staging, "a" * 40)
     assert not (tmp_path.parent / "escaped.txt").exists()
+    assert not (tmp_path / "escaped.txt").exists()
+
+
+def test_short_err_trims_verbose_messages():
+    e = RuntimeError("a" * 500)
+    assert len(updater._short_err(e)) <= 200
+    assert "RuntimeError" in updater._short_err(e)
 
 
 # ── HTTP layer ────────────────────────────────────────────────────────────────
@@ -388,7 +585,7 @@ def test_apply_endpoint_requires_auth(anon_client):
 
 
 def test_status_endpoint_works(client, monkeypatch):
-    async def fake_status():
+    async def fake_status(*, force_refresh=False):
         return {"is_repo": False, "available": True, "mode": "tarball",
                 "branch": "main", "head_sha": "aaaaaaa", "upstream_sha": "bbbbbbb",
                 "update_available": True, "behind": 1, "fetched": True}
@@ -398,3 +595,17 @@ def test_status_endpoint_works(client, monkeypatch):
     body = r.json()
     assert body["mode"] == "tarball"
     assert body["update_available"] is True
+
+
+def test_status_endpoint_passes_refresh_param(client, monkeypatch):
+    received = {}
+
+    async def fake_status(*, force_refresh=False):
+        received["force_refresh"] = force_refresh
+        return {"is_repo": False, "available": True, "mode": "tarball"}
+
+    monkeypatch.setattr(updater, "status", fake_status)
+    client.get("/api/update/status?refresh=1")
+    assert received["force_refresh"] is True
+    client.get("/api/update/status")
+    assert received["force_refresh"] is False

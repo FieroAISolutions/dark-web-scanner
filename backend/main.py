@@ -708,8 +708,8 @@ async def api_report(group_id: Optional[int] = None, since: Optional[str] = None
 
 
 @app.get("/api/update/status", dependencies=protected)
-async def api_update_status():
-    return await updater.status()
+async def api_update_status(refresh: int = 0):
+    return await updater.status(force_refresh=bool(refresh))
 
 
 @app.post("/api/update/apply", dependencies=protected)

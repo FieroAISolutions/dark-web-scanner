@@ -121,7 +121,7 @@ function initNav() {
     if (id === 'cfg-test-email-btn')     btn.addEventListener('click', testEmail);
     if (id === 'cfg-test-webhook-btn')   btn.addEventListener('click', testWebhook);
     if (id === 'cfg-regen-btn')          btn.addEventListener('click', regenerateToken);
-    if (id === 'upd-check-btn')          btn.addEventListener('click', checkForUpdates);
+    if (id === 'upd-check-btn')          btn.addEventListener('click', () => checkForUpdates(true));
     if (id === 'upd-apply-btn')          btn.addEventListener('click', applyUpdate);
     if (id === 'group-create-btn')       btn.addEventListener('click', createGroup);
     if (id === 'report-open-btn')        btn.addEventListener('click', () => openReport(false));
@@ -1127,12 +1127,13 @@ function _renderUpdateState(d) {
   applyBtn.disabled = !d.update_available;
 }
 
-async function checkForUpdates() {
+async function checkForUpdates(force = false) {
   const stateEl = $('upd-state');
   if (!stateEl) return;
   try {
     _setStatus('upd-msg', 'Checking…', '');
-    const r = await _apiFetch('/api/update/status', { timeoutMs: 60000 });
+    const url = force ? '/api/update/status?refresh=1' : '/api/update/status';
+    const r = await _apiFetch(url, { timeoutMs: 60000 });
     const d = await r.json();
     _renderUpdateState(d);
     _setStatus('upd-msg', '', '');
@@ -1159,7 +1160,7 @@ async function applyUpdate() {
     }
     msg += ' Stop and restart the launcher to load the new code.';
     _setStatus('upd-msg', msg, '#3fb950');
-    checkForUpdates();
+    checkForUpdates(true);
   } catch (e) {
     _setStatus('upd-msg', 'Error: ' + e.message, '#f85149');
   }
