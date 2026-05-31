@@ -150,6 +150,7 @@ def render(data: dict) -> str:
     parts = [
         "<!doctype html>",
         '<html lang="en"><head><meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
         f"<title>{_esc(title)}</title>",
         f"<style>{_CSS}</style></head><body>",
         '<div class="no-print" style="text-align:right;margin-bottom:8px;">'

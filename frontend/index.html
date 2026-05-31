@@ -107,10 +107,12 @@
       </div>
       <div class="card">
         <h3>Recent runs</h3>
-        <table class="table" id="dash-runs">
-          <thead><tr><th>Started</th><th>Finished</th><th>Emails</th><th>New breaches</th><th>New pastes</th><th>Status</th></tr></thead>
-          <tbody></tbody>
-        </table>
+        <div class="table-wrap">
+          <table class="table" id="dash-runs">
+            <thead><tr><th>Started</th><th>Finished</th><th>Emails</th><th>New breaches</th><th>New pastes</th><th>Status</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
     </section>
 
@@ -133,10 +135,12 @@
       </div>
       <div class="card">
         <h3>Monitored emails</h3>
-        <table class="table" id="monitor-table">
-          <thead><tr><th>Email</th><th>Group</th><th>Added</th><th>Breaches</th><th>Pastes</th><th>Last seen</th><th></th></tr></thead>
-          <tbody></tbody>
-        </table>
+        <div class="table-wrap">
+          <table class="table" id="monitor-table">
+            <thead><tr><th>Email</th><th>Group</th><th>Added</th><th>Breaches</th><th>Pastes</th><th>Last seen</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
     </section>
 
@@ -160,10 +164,12 @@
       </div>
       <div class="card">
         <h3>Groups</h3>
-        <table class="table" id="groups-table">
-          <thead><tr><th>Name</th><th>Description</th><th>Emails</th><th>Created</th><th>Scan</th><th></th></tr></thead>
-          <tbody></tbody>
-        </table>
+        <div class="table-wrap">
+          <table class="table" id="groups-table">
+            <thead><tr><th>Name</th><th class="wrap">Description</th><th>Emails</th><th>Created</th><th>Scan</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
     </section>
 
@@ -174,10 +180,12 @@
           <h3>Breach findings</h3>
           <button id="findings-refresh">↻ Refresh</button>
         </div>
-        <table class="table" id="findings-table">
-          <thead><tr><th>Severity</th><th>Email</th><th>Breach</th><th>Date</th><th>Pwned</th><th>Data classes</th><th>First seen</th></tr></thead>
-          <tbody></tbody>
-        </table>
+        <div class="table-wrap">
+          <table class="table" id="findings-table">
+            <thead><tr><th>Severity</th><th>Email</th><th>Breach</th><th>Date</th><th>Pwned</th><th class="wrap">Data classes</th><th>First seen</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
     </section>
 
@@ -188,10 +196,12 @@
           <h3>Paste findings</h3>
           <button id="pastes-refresh">↻ Refresh</button>
         </div>
-        <table class="table" id="pastes-table">
-          <thead><tr><th>Severity</th><th>Email</th><th>Source</th><th>Title</th><th>Date</th><th>Emails in paste</th><th>First seen</th></tr></thead>
-          <tbody></tbody>
-        </table>
+        <div class="table-wrap">
+          <table class="table" id="pastes-table">
+            <thead><tr><th>Severity</th><th>Email</th><th>Source</th><th class="wrap">Title</th><th>Date</th><th>Emails in paste</th><th>First seen</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
     </section>
 

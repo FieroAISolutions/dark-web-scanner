@@ -34,6 +34,7 @@ body {
   background: transparent; color: var(--muted);
   border: 1px solid transparent; border-radius: 6px;
   padding: 6px 12px; cursor: pointer; font-size: 13px;
+  flex-shrink: 0;
 }
 .tab:hover { color: var(--text); background: var(--panel-2); }
 .tab.active { color: var(--text); background: var(--panel-2); border-color: var(--border); }
@@ -51,7 +52,7 @@ main { padding: 16px; max-width: 1200px; margin: 0 auto; }
 
 .cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin-bottom: 12px; }
 .row { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; margin-bottom: 12px; }
-.row-spread { display: flex; align-items: center; justify-content: space-between; }
+.row-spread { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 @media (max-width: 800px) { .row { grid-template-columns: 1fr; } }
 
 .card {
@@ -66,7 +67,7 @@ main { padding: 16px; max-width: 1200px; margin: 0 auto; }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
 
-input[type="text"], input[type="password"], input[type="number"], textarea, select {
+input[type="text"], input[type="password"], input[type="number"], input[type="date"], textarea, select {
   width: 100%;
   background: var(--bg); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
@@ -103,13 +104,20 @@ button.danger { color: var(--bad); }
 .list .breach { color: var(--accent); }
 .list .when { color: var(--muted); float: right; font-size: 12px; }
 
+/* Tables: wrap in .table-wrap so the page never scrolls horizontally —
+   only the table itself does at narrow widths. */
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -4px; }
 .table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .table th, .table td {
   text-align: left; padding: 6px 8px;
   border-bottom: 1px solid var(--border);
+  white-space: nowrap;
 }
 .table th { color: var(--muted); font-weight: 500; }
 .table tr:hover td { background: var(--panel-2); }
+/* Long text columns (descriptions, breach lists) wrap so the table doesn't
+   become unreadably wide; the rest stay nowrap so column alignment is sane. */
+.table td.wrap, .table th.wrap { white-space: normal; min-width: 160px; }
 .badge {
   display: inline-block; padding: 1px 6px; border-radius: 4px;
   font-size: 11px; background: var(--panel-2); color: var(--muted);
@@ -185,3 +193,76 @@ button.danger { color: var(--bad); }
   padding: 4px 8px; color: var(--muted); font-size: 16px;
 }
 .logout:hover { color: var(--bad); border-color: var(--bad); }
+
+/* ── Mobile ─────────────────────────────────────────────────────────────────
+   Two breakpoints:
+     ≤ 720px → tablet / phone landscape: stack the topbar, give tabs a
+               horizontally scrollable row, bump tap targets, prevent iOS
+               zoom-on-focus by setting input font-size to 16px.
+     ≤ 480px → phone portrait: dashboard stat cards become 2-up, tighter
+               spacing, slightly smaller stat font.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+@media (max-width: 720px) {
+  .topbar {
+    flex-wrap: wrap;
+    padding: 8px 12px;
+    gap: 8px;
+  }
+  .brand { flex: 1 1 auto; }
+  /* tabs row spans the full topbar width and scrolls horizontally rather
+     than wrapping onto multiple lines */
+  .tabs {
+    order: 3;
+    width: 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 4px;
+    scrollbar-width: thin;
+  }
+  .tabs::-webkit-scrollbar { height: 3px; }
+  .tabs::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .tab { padding: 8px 12px; }
+
+  .group-filter {
+    order: 4; width: 100%;
+    justify-content: space-between;
+  }
+  .group-filter select { flex: 1; min-width: 0; padding: 8px 10px; font-size: 14px; }
+
+  .logout { padding: 8px 10px; font-size: 18px; }
+
+  main { padding: 12px; }
+  .card { padding: 12px; }
+  .stat { font-size: 24px; }
+
+  /* Tap targets: 40px min, bigger inputs. 16px input font keeps iOS Safari
+     from zooming in when an input gains focus. */
+  button {
+    padding: 10px 14px;
+    min-height: 40px;
+  }
+  input[type="text"], input[type="password"], input[type="number"],
+  input[type="date"], textarea, select {
+    padding: 10px 12px;
+    font-size: 16px;
+  }
+}
+
+@media (max-width: 480px) {
+  .cards { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .severity-cards { grid-template-columns: repeat(2, 1fr); }
+  .card { padding: 10px; margin-bottom: 8px; }
+  .stat { font-size: 20px; }
+  .card h3 { font-size: 13px; }
+  /* Long-text columns become a touch narrower so cards don't blow out. */
+  .table td.wrap, .table th.wrap { min-width: 140px; }
+}
+
+/* On very narrow viewports, lift the brand row so the user can see what
+   they're looking at before scrolling to find the active tab. */
+@media (max-width: 360px) {
+  .brand { font-size: 14px; }
+  .brand .logo { font-size: 16px; }
+}
