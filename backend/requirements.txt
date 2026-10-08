@@ -3,4 +3,4 @@ uvicorn[standard]==0.30.6
 httpx==0.28.1
 apscheduler==3.10.4
 cryptography==50.0.2
-bcrypt==4.2.0
+bcrypt==5.0.0
