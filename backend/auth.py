@@ -31,7 +31,7 @@ from typing import Optional
 import bcrypt
 from fastapi import HTTPException, Request, status
 
-from . import db, secrets_store
+from . import db, log_redact, secrets_store
 
 log = logging.getLogger("dws.auth")
 
@@ -74,6 +74,7 @@ def regenerate_token() -> str:
 
 
 def _write_token_file(plain: str) -> None:
+    log_redact.register_secret(plain)
     try:
         TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
         TOKEN_FILE.write_text(plain + "\n", encoding="utf-8")
@@ -86,7 +87,9 @@ def read_recovery_token() -> str:
     """Return the plaintext recovery token from disk, or empty if unavailable."""
     try:
         if TOKEN_FILE.exists():
-            return TOKEN_FILE.read_text(encoding="utf-8").strip()
+            token = TOKEN_FILE.read_text(encoding="utf-8").strip()
+            log_redact.register_secret(token)
+            return token
     except OSError:
         pass
     return ""

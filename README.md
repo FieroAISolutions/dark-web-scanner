@@ -50,9 +50,10 @@ The launcher creates a virtual environment under `backend/.venv`, installs the
 pinned runtime dependencies, and starts the dashboard at
 <http://localhost:7070>.
 
-On first run, the terminal prints a one-time sign-in URL and saves the recovery
+On first run, the terminal prints a sign-in URL and saves the recovery
 token to `data/admin_token.txt`. Keep that file private: anyone who has the
-token can access the dashboard and its stored data.
+token can access the dashboard and its stored data. The URL contains the same
+reusable recovery credential, so do not share terminal output containing it.
 
 ## Initial configuration
 
@@ -66,6 +67,10 @@ token can access the dashboard and its stored data.
 The default schedule is every six hours, but scheduled scanning is disabled
 until you enable it. API requests are rate-limited in the application; set the
 requests-per-minute value to match your HIBP plan.
+
+SMTP alerts require encrypted transport: implicit TLS on port 465, or a
+successful STARTTLS handshake on other ports (typically 587). Servers that
+do not support TLS are rejected before credentials or findings are sent.
 
 ## Data and security model
 
@@ -108,9 +113,9 @@ pytest
 
 On Windows, activate the environment with `.venv\Scripts\activate`.
 
-The repository currently includes 159 tests covering authentication,
+The repository currently includes 207 tests covering authentication,
 configuration, persistence, reports, secret handling, security headers,
-severity calculation, updates, and WebSocket tickets.
+severity calculation, updates, WebSocket origins/tickets, and alert transport.
 
 ## Project layout
 

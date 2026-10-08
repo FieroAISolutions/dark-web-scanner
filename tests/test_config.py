@@ -1,4 +1,4 @@
-from backend import config, db, secrets_store
+from backend import auth, config, db, secrets_store
 
 
 def test_get_public_masks_secrets():
@@ -14,10 +14,21 @@ def test_get_public_masks_secrets():
     assert "webhook_url" not in pub
     assert "github_token" not in pub
     assert "admin_token_hash" not in pub
+    assert "admin_password_hash" not in pub
     assert pub["hibp_api_key_set"] is True
     assert pub["smtp_pass_set"] is True
     assert pub["webhook_url_set"] is True
     assert pub["github_token_set"] is True
+
+
+def test_config_api_never_returns_password_verifier(client):
+    auth.set_password("synthetic-password")
+    digest = db.get_config_row()["admin_password_hash"]
+    assert digest
+    for response in (client.get("/api/config"), client.post("/api/config", json={})):
+        assert response.status_code == 200
+        assert "admin_password_hash" not in response.json()
+        assert digest not in response.text
 
 
 def test_github_token_round_trip_and_clear_endpoint(client):

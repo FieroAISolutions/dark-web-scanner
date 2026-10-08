@@ -1,4 +1,5 @@
 import asyncio
+import html as html_mod
 import logging
 import smtplib
 import ssl
@@ -7,7 +8,7 @@ from typing import Optional
 
 import httpx
 
-from . import severity as sev_mod
+from . import log_redact, severity as sev_mod
 
 log = logging.getLogger("dws.alerts")
 
@@ -36,11 +37,10 @@ def _smtp_send(cfg: dict, msg: EmailMessage) -> None:
     else:
         with smtplib.SMTP(host, port, timeout=30) as s:
             s.ehlo()
-            try:
-                s.starttls(context=ctx)
-                s.ehlo()
-            except smtplib.SMTPNotSupportedError:
-                pass
+            # Never downgrade authenticated mail or breach findings to plaintext.
+            # An unsupported/failed STARTTLS handshake must abort before login.
+            s.starttls(context=ctx)
+            s.ehlo()
             if user:
                 s.login(user, password)
             s.send_message(msg)
@@ -98,6 +98,10 @@ async def send_webhook(cfg: dict, *, subject: str, text: str,
     url = (cfg.get("webhook_url") or "").strip()
     if not url:
         raise RuntimeError("webhook URL not configured")
+    # A generic webhook may carry its credential anywhere in its URL, not just
+    # a query parameter. Register before HTTPX can log a request or exception.
+    log_redact.register_secret(url)
+    log_redact.register_secret(str(httpx.URL(url)))
     kind = (cfg.get("webhook_kind") or "generic").lower()
     if kind not in ("slack", "discord", "generic"):
         kind = "generic"
@@ -159,6 +163,9 @@ def _format_findings_text(breaches: list[dict], pastes: list[dict]) -> tuple[str
     sev_color = {"critical": "#f85149", "high": "#d29922",
                  "medium": "#bb8009", "low": "#8b949e"}
 
+    def esc(value) -> str:
+        return html_mod.escape(str(value))
+
     def badge(level: str) -> str:
         return (f'<span style="display:inline-block;padding:1px 6px;border-radius:4px;'
                 f'font-size:11px;background:{sev_color[level]};color:white;'
@@ -175,19 +182,19 @@ def _format_findings_text(breaches: list[dict], pastes: list[dict]) -> tuple[str
         for f in breaches[:50]:
             classes = ", ".join(f.get("data_classes") or []) or "—"
             html_parts.append(
-                f"<li>{badge(_level(f))}<b>{f['email']}</b> → "
-                f"{f.get('title') or f['breach_name']} "
-                f"<i>({f.get('breach_date') or '?'})</i><br>"
-                f"<small>{classes}</small></li>"
+                f"<li>{badge(_level(f))}<b>{esc(f['email'])}</b> → "
+                f"{esc(f.get('title') or f['breach_name'])} "
+                f"<i>({esc(f.get('breach_date') or '?')})</i><br>"
+                f"<small>{esc(classes)}</small></li>"
             )
         html_parts.append("</ul>")
     if pastes:
         html_parts.append(f"<h3>New paste findings ({len(pastes)})</h3><ul>")
         for f in pastes[:25]:
             html_parts.append(
-                f"<li>{badge(_level(f))}<b>{f['email']}</b> → "
-                f"{f.get('source') or '?'} {f.get('title') or ''} "
-                f"<i>({f.get('paste_date') or '?'})</i></li>"
+                f"<li>{badge(_level(f))}<b>{esc(f['email'])}</b> → "
+                f"{esc(f.get('source') or '?')} {esc(f.get('title') or '')} "
+                f"<i>({esc(f.get('paste_date') or '?')})</i></li>"
             )
         html_parts.append("</ul>")
 
