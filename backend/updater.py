@@ -46,7 +46,7 @@ log = logging.getLogger("dws.updater")
 # tarball install has no `git remote` to read from; env vars let forks rebrand
 # without code changes.
 UPSTREAM_OWNER = os.environ.get("DWS_UPSTREAM_OWNER", "enfierno21")
-UPSTREAM_REPO = os.environ.get("DWS_UPSTREAM_REPO", "DarkWebScanner")
+UPSTREAM_REPO = os.environ.get("DWS_UPSTREAM_REPO", "dark-web-scanner")
 DEFAULT_BRANCH = os.environ.get("DWS_UPSTREAM_BRANCH", "main")
 USER_AGENT = "DarkWebScanner-Updater"
 

@@ -131,3 +131,9 @@ only addresses you own or are authorized to process, secure your backups, and
 follow applicable privacy laws and the HIBP API terms. Findings indicate that
 an address appeared in a reported breach or paste; they do not prove that an
 account is currently compromised.
+
+## Community and security
+
+Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Please report
+security issues privately as described in [SECURITY.md](SECURITY.md). This
+project is available under the [MIT License](LICENSE).
