@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import re
 import secrets as py_secrets
 import sys
 import time
@@ -32,8 +31,6 @@ FRONTEND = ROOT / "frontend"
 # Per-process build stamp; substituted into index.html so cached JS/CSS from
 # previous server runs gets invalidated automatically on restart.
 BUILD_STAMP = os.environ.get("DWS_BUILD_STAMP") or str(int(time.time()))
-
-EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 # Hosts that map to this loopback service. Anything else is rejected to defend
 # against DNS-rebinding attacks pointing a foreign hostname at 127.0.0.1.
@@ -397,7 +394,11 @@ async def auth_login(payload: LoginReq, response: Response):
 
     if auth.verify_token(cred):
         log.info("login success via recovery token")
-        response.set_cookie(value=cred, **auth.cookie_kwargs())
+        recovery = auth.read_recovery_token()
+        if not recovery:
+            log.error("verified recovery token is missing on disk")
+            raise HTTPException(status_code=503, detail="authentication state unavailable")
+        response.set_cookie(value=recovery, **auth.cookie_kwargs())
         return {"ok": True, "method": "token", "password_set": has_pw}
 
     # Password verification calls bcrypt — run off the event loop so we don't
@@ -476,6 +477,24 @@ async def health():
     return {"ok": True}
 
 
+def _valid_email(value: str) -> bool:
+    """Apply a bounded, linear-time syntax check before sending data to HIBP."""
+    if not value or len(value) > 254 or any(ch.isspace() for ch in value):
+        return False
+    if value.count("@") != 1:
+        return False
+    local, domain = value.rsplit("@", 1)
+    if not local or len(local) > 64 or local.startswith(".") or local.endswith("."):
+        return False
+    labels = domain.split(".")
+    return (len(labels) >= 2 and all(
+        label and len(label) <= 63 and not label.startswith("-")
+        and not label.endswith("-")
+        and all(ch.isalnum() or ch == "-" for ch in label)
+        for label in labels
+    ))
+
+
 def _normalize_emails(items: list[str]) -> tuple[list[str], list[str]]:
     valid, invalid = [], []
     seen = set()
@@ -483,7 +502,7 @@ def _normalize_emails(items: list[str]) -> tuple[list[str], list[str]]:
         e = (raw or "").strip().lower()
         if not e:
             continue
-        if not EMAIL_RE.match(e):
+        if not _valid_email(e):
             invalid.append(raw)
             continue
         if e in seen:
