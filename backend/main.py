@@ -7,6 +7,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import (Depends, FastAPI, HTTPException, Request, Response,
@@ -209,6 +210,8 @@ def _print_setup_banner(token: str, port: int) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Uvicorn may configure its handlers after this module is first imported.
+    log_redact.install()
     db.init()
     config_mod.migrate_legacy_secrets()
     new_token = auth.ensure_initial_token()
@@ -231,6 +234,36 @@ app = FastAPI(title="DarkWebScanner", lifespan=lifespan)
 
 # ── middlewares ───────────────────────────────────────────────────────────────
 
+def _request_origin_error(connection, *, check_origin: bool) -> Optional[str]:
+    """Shared HTTP/WS boundary; absent Origin remains valid for native clients."""
+    host = connection.headers.get("host") or ""
+    try:
+        target = urlsplit("//" + host)
+        if (not host or target.hostname not in ALLOWED_HOST_NAMES
+                or target.username is not None or target.password is not None
+                or target.path or target.query or target.fragment):
+            return "invalid Host header"
+        scheme = {"ws": "http", "wss": "https"}.get(
+            connection.url.scheme, connection.url.scheme)
+        port = target.port or (443 if scheme == "https" else 80)
+    except ValueError:
+        return "invalid Host header"
+
+    origin = connection.headers.get("origin")
+    if check_origin and origin is not None:
+        try:
+            parsed = urlsplit(origin)
+            origin_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            if (parsed.scheme != scheme or parsed.hostname != target.hostname
+                    or origin_port != port or parsed.username is not None
+                    or parsed.password is not None or parsed.path
+                    or parsed.query or parsed.fragment):
+                return "invalid Origin"
+        except ValueError:
+            return "invalid Origin"
+    return None
+
+
 @app.middleware("http")
 async def host_and_csrf_guard(request: Request, call_next):
     """
@@ -238,22 +271,10 @@ async def host_and_csrf_guard(request: Request, call_next):
     Origin header on state-changing requests (CSRF defence). Static and
     websocket endpoints follow the same rules.
     """
-    host_header = (request.headers.get("host") or "").split(":")[0].lower()
-    if host_header and host_header not in ALLOWED_HOST_NAMES:
-        return Response(status_code=400, content="invalid Host header")
-
-    if request.method not in SAFE_METHODS:
-        origin = request.headers.get("origin")
-        if origin:
-            try:
-                from urllib.parse import urlparse
-                parsed = urlparse(origin)
-                if parsed.hostname not in ALLOWED_HOST_NAMES:
-                    return Response(status_code=403, content="invalid Origin")
-            except Exception:
-                return Response(status_code=403, content="invalid Origin")
-        # If no Origin header at all, the caller is non-browser — that's fine,
-        # they'll still need a valid auth token to do anything.
+    error = _request_origin_error(request, check_origin=request.method not in SAFE_METHODS)
+    if error:
+        return Response(status_code=400 if error == "invalid Host header" else 403,
+                        content=error)
 
     response = await call_next(request)
     return response
@@ -764,6 +785,11 @@ async def api_test_webhook():
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
+    # HTTP middleware does not run for WebSocket upgrades. Check the same
+    # boundary before consuming a one-shot ticket or accepting a cookie.
+    if _request_origin_error(ws, check_origin=True):
+        await ws.close(code=1008)
+        return
     # Auth precedence:
     #   1. ?ticket=… one-shot ticket (preferred — survives browser quirks
     #      where cookies aren't attached to WS upgrade requests).

@@ -1,4 +1,4 @@
-from . import db, secrets_store
+from . import db, log_redact, secrets_store
 
 
 SECRET_FIELDS = {"hibp_api_key", "smtp_pass", "webhook_url", "github_token"}
@@ -17,13 +17,15 @@ def get_full() -> dict:
     for field in SECRET_FIELDS:
         if field in row:
             row[field] = secrets_store.decrypt(row[field] or "")
+            log_redact.register_secret(row[field])
     return row
 
 
 def get_public() -> dict:
     """For the UI — secrets replaced with *_set boolean flags."""
     full = get_full()
-    out = {k: v for k, v in full.items() if k not in SECRET_FIELDS and k != "admin_token_hash"}
+    hidden = SECRET_FIELDS | {"admin_token_hash", "admin_password_hash"}
+    out = {k: v for k, v in full.items() if k not in hidden}
     out["enabled"] = bool(full["enabled"])
     out["alert_on_new"] = bool(full["alert_on_new"])
     out["include_pastes"] = bool(full["include_pastes"])
