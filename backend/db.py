@@ -1,3 +1,4 @@
+import os
 import json
 import sqlite3
 import threading
@@ -169,7 +170,7 @@ def _migrate_monitored_emails_columns(conn: sqlite3.Connection) -> None:
 
 
 def init() -> None:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    secrets_store.private_directory(DB_PATH.parent)
     with connect() as conn:
         conn.executescript(SCHEMA)
         _migrate_config_columns(conn)
@@ -188,6 +189,10 @@ def init() -> None:
 
 @contextmanager
 def connect():
+    secrets_store.private_directory(DB_PATH.parent)
+    fd = os.open(DB_PATH, os.O_CREAT | os.O_WRONLY, 0o600)
+    os.close(fd)
+    secrets_store.restrict_path(DB_PATH)
     conn = sqlite3.connect(DB_PATH, timeout=10, isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")

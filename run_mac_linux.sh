@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+umask 077
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BACKEND="$SCRIPT_DIR/backend"

@@ -28,24 +28,73 @@ PREFIX = "enc:v1:"
 KEY_PATH = Path(__file__).resolve().parent.parent / "data" / ".scanner_key"
 
 _fernet: Optional[Fernet] = None
+_windows_sid: Optional[str] = None
 
 
 def _restrict(path: Path) -> None:
-    """Best-effort 0600 permissions; no-op on Windows."""
+    """Fail closed if owner-only permissions cannot be applied."""
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        import csv
+        import subprocess
+        global _windows_sid
+        if _windows_sid is None:
+            _windows_sid = next(csv.reader(subprocess.check_output(
+                ["whoami", "/user", "/fo", "csv", "/nh"], text=True).splitlines()))[1]
+        sid = _windows_sid
+        advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+        descriptor = ctypes.c_void_p()
+        convert = advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW
+        convert.argtypes = [wintypes.LPCWSTR, wintypes.DWORD,
+                            ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+        convert.restype = wintypes.BOOL
+        rights = "OICI;FA" if path.is_dir() else ";FA"
+        if not convert(f"D:P(A;{rights};;;{sid})", 1, ctypes.byref(descriptor), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            apply = advapi.SetFileSecurityW
+            apply.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
+            apply.restype = wintypes.BOOL
+            if not apply(str(path), 0x80000004, descriptor):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            free = ctypes.WinDLL("kernel32").LocalFree
+            free.argtypes = [ctypes.c_void_p]
+            free.restype = ctypes.c_void_p
+            free(descriptor)
+    else:
+        os.chmod(path, 0o700 if path.is_dir() else 0o600)
+
+
+def private_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _restrict(path)
+
+
+def private_write(path: Path, data: bytes) -> None:
+    private_directory(path.parent)
+    if path.exists():
+        _restrict(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
     try:
-        os.chmod(path, 0o600)
-    except (OSError, NotImplementedError):
-        pass
+        _restrict(path)
+        with os.fdopen(fd, "wb", closefd=False) as stream:
+            stream.write(data)
+    finally:
+        os.close(fd)
 
 
 def _load_or_create_key() -> bytes:
-    KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    private_directory(KEY_PATH.parent)
     if KEY_PATH.exists():
+        _restrict(KEY_PATH)
         data = KEY_PATH.read_bytes().strip()
         if data:
             return data
     key = Fernet.generate_key()
-    KEY_PATH.write_bytes(key)
+    private_write(KEY_PATH, key)
     _restrict(KEY_PATH)
     log.info("generated new encryption key at %s", KEY_PATH)
     return key
