@@ -89,6 +89,7 @@ def private_write(path: Path, data: bytes) -> None:
 def _load_or_create_key() -> bytes:
     private_directory(KEY_PATH.parent)
     if KEY_PATH.exists():
+        _restrict(KEY_PATH)
         data = KEY_PATH.read_bytes().strip()
         if data:
             return data

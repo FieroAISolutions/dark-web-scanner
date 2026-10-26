@@ -44,6 +44,8 @@ def _set_token_hash(h: str) -> None:
 def ensure_initial_token() -> Optional[str]:
     """Generate-and-persist on first run. Returns the plaintext only when newly created."""
     if _stored_token_hash():
+        if TOKEN_FILE.exists():
+            secrets_store.restrict_path(TOKEN_FILE)
         return None
     plain = _secrets.token_urlsafe(32)
     _write_token_file(plain)
@@ -67,6 +69,7 @@ def read_recovery_token() -> str:
     """Return the plaintext recovery token from disk, or empty if unavailable."""
     try:
         if TOKEN_FILE.exists():
+            secrets_store.restrict_path(TOKEN_FILE)
             token = TOKEN_FILE.read_text(encoding="utf-8").strip()
             log_redact.register_secret(token)
             return token

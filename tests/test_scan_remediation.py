@@ -103,3 +103,30 @@ async def test_one_shot_failure_never_persists(tmp_path, monkeypatch):
     assert result.errors
     assert 'private@example.com' not in str(result.errors)
     assert db.recent_runs() == []
+
+
+def test_existing_credentials_get_restricted(monkeypatch):
+    from backend import secrets_store
+    auth.ensure_initial_token()
+    secrets_store.encrypt('synthetic-secret')
+    seen = []
+    original = secrets_store._restrict
+    def restrict(path):
+        seen.append(path)
+        original(path)
+    monkeypatch.setattr(secrets_store, '_restrict', restrict)
+    auth.ensure_initial_token()
+    secrets_store._load_or_create_key()
+    assert auth.TOKEN_FILE in seen
+    assert secrets_store.KEY_PATH in seen
+
+
+def test_permission_failure_prevents_secret_write(tmp_path, monkeypatch):
+    from backend import secrets_store
+    path = tmp_path / 'private' / 'secret'
+    def fail(path):
+        raise PermissionError('permissions unavailable')
+    monkeypatch.setattr(secrets_store, '_restrict', fail)
+    with pytest.raises(PermissionError):
+        secrets_store.private_write(path, b'synthetic-secret')
+    assert not path.exists()
