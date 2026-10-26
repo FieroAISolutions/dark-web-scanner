@@ -100,8 +100,8 @@ def _is_repo_sync() -> bool:
     if not _git_available():
         return False
     try:
-        rc, _, _ = _git_sync("rev-parse", "--is-inside-work-tree")
-        return rc == 0
+        rc, top, _ = _git_sync("rev-parse", "--show-toplevel")
+        return rc == 0 and Path(top.strip()).resolve() == ROOT.resolve()
     except Exception:
         return False
 

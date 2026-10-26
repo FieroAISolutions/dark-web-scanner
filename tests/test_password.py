@@ -79,7 +79,8 @@ def test_login_with_password_returns_method_password(anon_client, admin_token):
     assert body["method"] == "password"
     assert body["password_set"] is True
     # Cookie should be set so subsequent requests are authed
-    assert "dws_token" in r.cookies
+    assert not r.cookies
+    assert auth.verify_session(r.json()["session"])
 
 
 def test_login_with_token_still_works_after_password_set(anon_client, admin_token):

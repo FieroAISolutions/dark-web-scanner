@@ -26,6 +26,9 @@ def isolate_state(tmp_path, monkeypatch):
     monkeypatch.setattr(secrets_store, "_fernet", None)
 
     db.init()
+    from backend import main
+    main._login_attempts.clear()
+    auth._sessions.clear()
     yield
 
 
@@ -45,7 +48,7 @@ def admin_token():
 def client(admin_token, monkeypatch):
     """Authenticated FastAPI TestClient. Uses a pre-set auth cookie."""
     from fastapi.testclient import TestClient
-    from backend import main as main_mod
+    from backend import auth, main as main_mod
 
     # Allow the TestClient's default Host: testserver to pass our middleware
     monkeypatch.setattr(
@@ -54,7 +57,7 @@ def client(admin_token, monkeypatch):
     )
 
     c = TestClient(main_mod.app)
-    c.cookies.set("dws_token", admin_token)
+    c.headers["X-Session-Token"] = auth.issue_session()
     return c
 
 

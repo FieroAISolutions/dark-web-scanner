@@ -12,3 +12,5 @@ data/
 .DS_Store
 .vscode/
 .idea/
+
+.test-deps/

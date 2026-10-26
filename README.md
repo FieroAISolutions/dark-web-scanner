@@ -50,14 +50,19 @@ The launcher creates a virtual environment under `backend/.venv`, installs the
 pinned runtime dependencies, and starts the dashboard at
 <http://localhost:7070>.
 
-On first run, the terminal prints a sign-in URL and saves the recovery
-token to `data/admin_token.txt`. Keep that file private: anyone who has the
-token can access the dashboard and its stored data. The URL contains the same
-reusable recovery credential, so do not share terminal output containing it.
+On first run, open the dashboard and enter the recovery token saved in
+`data/admin_token.txt`. Keep this file private. Recovery tokens are accepted
+only in the login POST body or the `X-Auth-Token` header for native clients.
+Browser sessions use an expiring, revocable token in origin-scoped tab storage;
+credentials are never set as cookies or accepted in URL query strings.
+Logins are limited globally to ten attempts per minute with one password
+verification at a time. Passwords support at most 72 UTF-8 bytes.
+Group reports omit global scan history because runs span multiple groups.
+One-shot scans do not create database run records.
 
 ## Initial configuration
 
-1. Open the first-run URL printed in the terminal.
+1. Open the dashboard and sign in with the recovery token from the file.
 2. Set a password in the dashboard's authentication settings.
 3. Add your HIBP API key and a descriptive user-agent.
 4. Add the email addresses you are authorized to monitor.

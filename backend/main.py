@@ -35,7 +35,10 @@ BUILD_STAMP = os.environ.get("DWS_BUILD_STAMP") or str(int(time.time()))
 
 # Hosts that map to this loopback service. Anything else is rejected to defend
 # against DNS-rebinding attacks pointing a foreign hostname at 127.0.0.1.
-ALLOWED_HOST_NAMES = {"localhost", "127.0.0.1"}
+ALLOWED_HOST_NAMES = {"localhost", "127.0.0.1"} | {
+    host.strip().lower() for host in os.environ.get("DWS_ALLOWED_HOSTS", "").split(",")
+    if host.strip()
+}
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
@@ -199,8 +202,8 @@ def _print_setup_banner(token: str, port: int) -> None:
     msg = (
         f"\n{bar}\n"
         f"  DarkWebScanner — first-run admin token created.\n\n"
-        f"  Open this URL once to authenticate (token will be set as a cookie):\n"
-        f"    http://localhost:{port}/?token={token}\n\n"
+        f"  Open the dashboard and enter the recovery token from the file below:\n"
+        f"    http://localhost:{port}/\n\n"
         f"  Token also saved to: {auth.TOKEN_FILE}\n"
         f"  KEEP THIS FILE SAFE. Anyone with it can read your scanner data.\n"
         f"{bar}\n"
@@ -262,6 +265,34 @@ def _request_origin_error(connection, *, check_origin: bool) -> Optional[str]:
         except ValueError:
             return "invalid Origin"
     return None
+
+
+class AuthBodyLimit:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope.get("path", "").startswith("/api/auth/"):
+            return await self.app(scope, receive, send)
+        chunks, size = [], 0
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            size += len(message.get("body", b""))
+            if size > 4096:
+                return await Response("Authentication request too large", status_code=413)(scope, receive, send)
+            chunks.append(message)
+            if not message.get("more_body", False):
+                break
+        async def bounded_receive():
+            if chunks:
+                return chunks.pop(0)
+            return await receive()
+        await self.app(scope, bounded_receive, send)
+
+
+app.add_middleware(AuthBodyLimit)
 
 
 @app.middleware("http")
@@ -336,12 +367,12 @@ class EmailGroupReq(BaseModel):
 
 
 class LoginReq(BaseModel):
-    token: str  # accepts either the recovery token or the configured password
+    token: str = Field(max_length=512)  # recovery token or password
 
 
 class SetPasswordReq(BaseModel):
-    password: Optional[str] = None  # new password (required for set-password)
-    current: Optional[str] = None   # required when changing or clearing an existing password
+    password: Optional[str] = Field(default=None, max_length=512)  # new password (required for set-password)
+    current: Optional[str] = Field(default=None, max_length=512)   # required when changing or clearing an existing password
 
 
 # ── routes: index + static ────────────────────────────────────────────────────
@@ -359,17 +390,7 @@ def _render_index() -> str:
 
 @app.get("/")
 async def index(request: Request):
-    """
-    Serves the SPA. If a `?token=` query param is supplied and matches the
-    recovery token, sets the auth cookie and redirects to a clean URL so the
-    token doesn't sit in browser history. (Passwords are only accepted via
-    POST /api/auth/login.)
-    """
-    qs_token = request.query_params.get("token")
-    if qs_token and auth.verify_token(qs_token):
-        resp = RedirectResponse(url="/", status_code=303)
-        resp.set_cookie(value=qs_token, **auth.cookie_kwargs())
-        return resp
+    """Serve the sign-in page without accepting credentials from URLs."""
     return Response(
         content=_render_index(),
         media_type="text/html; charset=utf-8",
@@ -395,51 +416,35 @@ app.mount("/static", _NoCacheStaticFiles(directory=FRONTEND / "static"), name="s
 @app.get("/api/auth/status")
 async def auth_status(request: Request):
     return {
-        "authenticated": auth.verify_token(auth.extract_token(request)),
+        "authenticated": auth.authenticated(request),
         "password_set": auth.has_password(),
     }
 
 
+_login_attempts: list[float] = []
+_password_slot = asyncio.Lock()
+
+
 @app.post("/api/auth/login")
-async def auth_login(payload: LoginReq, response: Response):
-    """
-    Accept either the recovery token or the configured password. On success,
-    the cookie is set to the recovery token in either case so subsequent
-    per-request checks remain a single SHA-256 compare (no bcrypt per request).
-    """
-    cred = (payload.token or "").strip()
-    has_pw = auth.has_password()
-    log.info("login attempt: cred_len=%d password_set=%s", len(cred), has_pw)
-    if not cred:
-        raise HTTPException(status_code=401, detail="missing credential")
-
-    if auth.verify_token(cred):
-        log.info("login success via recovery token")
-        recovery = auth.read_recovery_token()
-        if not recovery:
-            log.error("verified recovery token is missing on disk")
-            raise HTTPException(status_code=503, detail="authentication state unavailable")
-        response.set_cookie(value=recovery, **auth.cookie_kwargs())
-        return {"ok": True, "method": "token", "password_set": has_pw}
-
-    # Password verification calls bcrypt — run off the event loop so we don't
-    # stall other concurrent requests (WebSocket pings, dashboard fetches).
-    if await asyncio.to_thread(auth.verify_password, cred):
-        recovery = auth.read_recovery_token()
-        if not recovery:
-            log.warning("password login succeeded but recovery token is missing on disk; "
-                        "regenerating so the cookie can be set")
-            recovery = auth.regenerate_token()
-        log.info("login success via password")
-        response.set_cookie(value=recovery, **auth.cookie_kwargs())
-        return {"ok": True, "method": "password", "password_set": True}
-
-    log.info("login failed: neither token nor password matched (password_set=%s)", has_pw)
-    raise HTTPException(status_code=401, detail="invalid credential")
+async def auth_login(payload: LoginReq):
+    now = time.monotonic()
+    _login_attempts[:] = [t for t in _login_attempts if now - t < 60]
+    if len(_login_attempts) >= 10 or _password_slot.locked():
+        raise HTTPException(status_code=429, detail="Too many login attempts; retry later",
+                            headers={"Retry-After": "60"})
+    _login_attempts.append(now)
+    cred = payload.token.strip()
+    async with _password_slot:
+        valid = await asyncio.to_thread(auth.verify_credential, cred)
+    if not valid:
+        raise HTTPException(status_code=401, detail="invalid credential")
+    return {"ok": True, "method": "token" if auth.verify_token(cred) else "password",
+            "password_set": auth.has_password(), "session": auth.issue_session()}
 
 
 @app.post("/api/auth/logout")
-async def auth_logout(response: Response):
+async def auth_logout(request: Request, response: Response):
+    auth.revoke_session(request.headers.get("X-Session-Token") or "")
     response.delete_cookie(key=auth.TOKEN_COOKIE, path="/")
     return {"ok": True}
 
@@ -447,8 +452,9 @@ async def auth_logout(response: Response):
 @app.post("/api/auth/regenerate", dependencies=[Depends(auth.require_auth)])
 async def auth_regenerate(response: Response):
     new_token = auth.regenerate_token()
-    response.set_cookie(value=new_token, **auth.cookie_kwargs())
-    return {"ok": True, "token": new_token, "saved_to": str(auth.TOKEN_FILE)}
+    response.delete_cookie(key=auth.TOKEN_COOKIE, path="/")
+    return {"ok": True, "token": new_token, "saved_to": str(auth.TOKEN_FILE),
+            "session": auth.issue_session()}
 
 
 @app.post("/api/auth/ws-ticket", dependencies=[Depends(auth.require_auth)])
@@ -576,7 +582,7 @@ async def api_dashboard(group_id: Optional[int] = None):
     stats["next_run_at"] = scheduler.next_run_time()
     stats["scan_in_progress"] = _scan_lock.locked()
     stats["recent_findings"] = db.list_findings(limit=10, group_id=group_id)
-    stats["recent_runs"] = db.recent_runs(limit=5)
+    stats["recent_runs"] = db.recent_runs(limit=5) if group_id is None else []
     stats["severity_counts"] = db.severity_counts(group_id=group_id)
     stats["group_id"] = group_id
     return stats
@@ -790,22 +796,8 @@ async def ws_endpoint(ws: WebSocket):
     if _request_origin_error(ws, check_origin=True):
         await ws.close(code=1008)
         return
-    # Auth precedence:
-    #   1. ?ticket=… one-shot ticket (preferred — survives browser quirks
-    #      where cookies aren't attached to WS upgrade requests).
-    #   2. dws_token cookie.
-    #   3. ?token=… recovery token (manual / debugging).
-    cookie_token = ws.cookies.get(auth.TOKEN_COOKIE) or ""
     qs_ticket = ws.query_params.get("ticket") or ""
-    qs_token = ws.query_params.get("token") or ""
-
-    authed = False
-    if qs_ticket and await _consume_ws_ticket(qs_ticket):
-        authed = True
-    elif cookie_token and auth.verify_token(cookie_token):
-        authed = True
-    elif qs_token and auth.verify_token(qs_token):
-        authed = True
+    authed = bool(qs_ticket and await _consume_ws_ticket(qs_ticket)) or auth.authenticated(ws)
 
     if not authed:
         log.info("ws: rejected (no valid ticket/cookie/token)")

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
@@ -142,6 +143,11 @@ async def _emit(cb: Optional[ProgressCb], event: dict) -> None:
         log.exception("progress callback failed")
 
 
+def _finish_run(run_id, **kwargs):
+    if run_id > 0:
+        db.finish_run(run_id, **kwargs)
+
+
 async def run_scan(
     *,
     cfg: dict,
@@ -155,11 +161,11 @@ async def run_scan(
     one-shot read-only report.
     """
     if not emails:
-        run_id = db.create_run(0, persist)
-        db.finish_run(run_id, new_breaches=0, new_pastes=0, status="ok")
+        run_id = db.create_run(0, persist) if persist else -(secrets.randbits(52) + 1)
+        _finish_run(run_id, new_breaches=0, new_pastes=0, status="ok")
         return ScanResult(run_id=run_id, email_count=0)
 
-    run_id = db.create_run(len(emails), persist)
+    run_id = db.create_run(len(emails), persist) if persist else -(secrets.randbits(52) + 1)
     result = ScanResult(run_id=run_id, email_count=len(emails))
 
     try:
@@ -169,10 +175,10 @@ async def run_scan(
             user_agent=cfg.get("user_agent") or "DarkWebScanner/1.0",
         )
     except HIBPAuthError as e:
-        db.finish_run(run_id, new_breaches=0, new_pastes=0, status="error", error=str(e))
-        result.errors.append(str(e))
+        _finish_run(run_id, new_breaches=0, new_pastes=0, status="error", error=type(e).__name__)
+        result.errors.append(type(e).__name__)
         await _emit(progress, {"type": "scan_finished", "run_id": run_id,
-                               "status": "error", "error": str(e)})
+                               "status": "error", "error": type(e).__name__})
         return result
 
     include_pastes = bool(cfg.get("include_pastes"))
@@ -193,11 +199,11 @@ async def run_scan(
                 try:
                     breaches = await client.breached_account(email)
                 except HIBPError as e:
-                    msg = f"{email}: {e}"
+                    msg = f"Breach lookup failed: {type(e).__name__}"
                     log.warning(msg)
                     result.errors.append(msg)
                     await _emit(progress, {"type": "scan_error", "run_id": run_id,
-                                           "email": email, "error": str(e)})
+                                           "email": email, "error": type(e).__name__})
                     if isinstance(e, HIBPAuthError):
                         raise
                     continue
@@ -231,7 +237,7 @@ async def run_scan(
                     try:
                         pastes = await client.paste_account(email)
                     except HIBPError as e:
-                        msg = f"{email} (pastes): {e}"
+                        msg = f"Paste lookup failed: {type(e).__name__}"
                         log.warning(msg)
                         result.errors.append(msg)
                         pastes = []
@@ -260,7 +266,7 @@ async def run_scan(
                             await _emit(progress, {"type": "finding", "kind": "paste",
                                                    "run_id": run_id, **finding})
 
-        db.finish_run(
+        _finish_run(
             run_id,
             new_breaches=len(result.new_breach_findings),
             new_pastes=len(result.new_paste_findings),
@@ -275,19 +281,19 @@ async def run_scan(
             "errors": result.errors,
         })
     except HIBPAuthError as e:
-        db.finish_run(run_id, new_breaches=len(result.new_breach_findings),
+        _finish_run(run_id, new_breaches=len(result.new_breach_findings),
                       new_pastes=len(result.new_paste_findings),
-                      status="error", error=str(e))
-        result.errors.append(str(e))
+                      status="error", error=type(e).__name__)
+        result.errors.append(type(e).__name__)
         await _emit(progress, {"type": "scan_finished", "run_id": run_id,
-                               "status": "error", "error": str(e)})
+                               "status": "error", "error": type(e).__name__})
     except Exception as e:
-        log.exception("scan failed")
-        db.finish_run(run_id, new_breaches=len(result.new_breach_findings),
+        log.error("scan failed: %s", type(e).__name__)
+        _finish_run(run_id, new_breaches=len(result.new_breach_findings),
                       new_pastes=len(result.new_paste_findings),
-                      status="error", error=str(e))
-        result.errors.append(str(e))
+                      status="error", error=type(e).__name__)
+        result.errors.append(type(e).__name__)
         await _emit(progress, {"type": "scan_finished", "run_id": run_id,
-                               "status": "error", "error": str(e)})
+                               "status": "error", "error": type(e).__name__})
 
     return result

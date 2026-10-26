@@ -58,7 +58,7 @@ def gather_report_data(group_id: Optional[int], since: str) -> dict:
     monitored = db.list_emails(group_id=group_id)
     sev_counts = db.severity_counts(group_id=group_id)
 
-    runs = db.recent_runs(limit=100)
+    runs = db.recent_runs(limit=100) if group_id is None else []
     if since:
         runs = [r for r in runs if (r.get("started_at") or "") >= since]
 

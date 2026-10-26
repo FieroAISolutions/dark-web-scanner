@@ -53,8 +53,8 @@ def test_ws_ticket_invalid_value_rejected(anon_client):
         pass
 
 
-def test_ws_cookie_path_still_works(client):
-    """The original cookie-based auth still works when the browser cooperates."""
+def test_ws_session_header_works(client):
+    """Native clients may authenticate with a session header."""
     with client.websocket_connect("/ws") as ws:
         msg = ws.receive_json()
         assert msg["type"] == "hello"

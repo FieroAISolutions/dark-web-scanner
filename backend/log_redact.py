@@ -10,7 +10,7 @@ import threading
 from collections import OrderedDict
 from urllib.parse import quote
 
-EMAIL_RE = re.compile(r"\b([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9])[A-Za-z0-9.-]*\.([A-Za-z]{2,24})\b")
+EMAIL_RE = re.compile(r"([^\s@])[^\s@]*@([^\s@.])[^\s@]*\.([^\s@.]+)")
 QUERY_SECRET_RE = re.compile(
     r"(?i)([?&](?:token|ticket|access_token|api_key|apikey|key|password|secret)=)[^&\s\"'<>]*"
 )

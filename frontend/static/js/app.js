@@ -1,3 +1,5 @@
+let _session = sessionStorage.getItem('dws_session') || '';
+function _authHeaders() { return _session ? {'X-Session-Token': _session} : {}; }
 // Build stamp logged so we can confirm which version is actually running in
 // the browser when diagnosing cache issues. Bump the literal string here and
 // in the related backend constants whenever the auth/WS contract changes.
@@ -30,6 +32,7 @@ async function _apiFetch(url, opts = {}) {
     r = await fetch(url, {
       credentials: 'same-origin',
       ...opts,
+      headers: {..._authHeaders(), ...(opts.headers || {})},
       signal: opts.signal ?? ac.signal,
     });
   } catch (e) {
@@ -190,6 +193,7 @@ async function _fetchWsTicket() {
     const r = await fetch('/api/auth/ws-ticket', {
       method: 'POST',
       credentials: 'same-origin',
+      headers: _authHeaders(),
     });
     if (r.ok) {
       const d = await r.json();
@@ -225,6 +229,7 @@ async function connectWebSocket() {
 function handleWsEvent(e) {
   switch (e.type) {
     case 'scan_started':
+      if (e.persist === false && $('report-run-btn')?.disabled) _activeReportRunId = e.run_id;
       _showProgress(0, e.email_count, 'Starting…');
       _setScanButtons(true);
       break;
@@ -798,8 +803,10 @@ async function login() {
       throw new Error(j.detail || 'invalid credential');
     }
     const loginData = await r.json().catch(() => ({}));
+    _session = loginData.session || '';
+    sessionStorage.setItem('dws_session', _session);
 
-    const probe = await fetch('/api/auth/status', { credentials: 'same-origin' });
+    const probe = await fetch('/api/auth/status', { credentials: 'same-origin', headers: _authHeaders() });
     const pd = await probe.json().catch(() => ({}));
     if (!pd.authenticated) {
       throw new Error(
@@ -824,8 +831,10 @@ async function login() {
 async function logout() {
   if (!confirm('Sign out of DarkWebScanner?')) return;
   try {
-    await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+    await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin', headers: _authHeaders() });
   } catch {}
+  _session = '';
+  sessionStorage.removeItem('dws_session');
   showLogin();
   if (_ws) { try { _ws.close(); } catch {} }
 }
@@ -837,6 +846,8 @@ async function regenerateToken() {
   try {
     const r = await _apiFetch('/api/auth/regenerate', { method: 'POST' });
     const d = await r.json();
+    _session = d.session;
+    sessionStorage.setItem('dws_session', _session);
     _setStatus('cfg-token-status',
       `New recovery token saved to ${d.saved_to}.`,
       '#3fb950');
@@ -882,7 +893,7 @@ async function savePasswordModal() {
 
 async function refreshAuthState() {
   try {
-    const r = await fetch('/api/auth/status', { credentials: 'same-origin' });
+    const r = await fetch('/api/auth/status', { credentials: 'same-origin', headers: _authHeaders() });
     const d = await r.json();
     const el = $('cfg-pw-state');
     if (el) {
@@ -1065,21 +1076,9 @@ function _reportUrl() {
 
 async function openReport(download) {
   const url = _reportUrl();
-
-  if (!download) {
-    // Navigate the new tab directly to the report URL so the *response's* own
-    // CSP applies (a relaxed one that permits the inline window.print()
-    // handler). Previously we fetched + document.write()'d into an
-    // about:blank window, which inherited the SPA's strict CSP and silently
-    // blocked the print button. Cookies ride along on same-origin navigations
-    // so auth needs no extra plumbing.
-    const w = window.open(url, '_blank');
-    if (!w) {
-      _setStatus('report-status', 'Pop-up blocked — use Download instead.', '#f85149');
-      return;
-    }
-    _setStatus('report-status', 'Opened.', '#3fb950');
-    setTimeout(() => _setStatus('report-status', '', ''), 4000);
+  const reportWindow = download ? null : window.open('', '_blank');
+  if (!download && !reportWindow) {
+    _setStatus('report-status', 'Pop-up blocked — use Download instead.', '#f85149');
     return;
   }
 
@@ -1088,6 +1087,22 @@ async function openReport(download) {
     const r = await _apiFetch(url, { timeoutMs: 60000 });
     const html = await r.text();
     const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    if (!download) {
+      const frame = reportWindow.document.createElement('iframe');
+      frame.setAttribute('sandbox', 'allow-same-origin allow-modals');
+      frame.addEventListener('load', () => {
+        const button = frame.contentDocument.querySelector('button');
+        if (button) {
+          button.removeAttribute('onclick');
+          button.addEventListener('click', () => frame.contentWindow.print());
+        }
+      });
+      frame.style.cssText = 'width:100%;height:100vh;border:0';
+      frame.srcdoc = html;
+      reportWindow.document.body.appendChild(frame);
+      _setStatus('report-status', 'Opened.', '#3fb950');
+      return;
+    }
     const objUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = objUrl;
@@ -1226,7 +1241,7 @@ async function bootstrap() {
   // The server-side `/?token=` handler sets the cookie via redirect, so by
   // the time this script runs we should already be authenticated. Probe once.
   try {
-    const r = await fetch('/api/auth/status', { credentials: 'same-origin' });
+    const r = await fetch('/api/auth/status', { credentials: 'same-origin', headers: _authHeaders() });
     const d = await r.json();
     if (d.authenticated) {
       bootApp();
